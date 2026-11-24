@@ -73,14 +73,16 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
         const milvus_storage::api::ColumnGroupFile& file,
         const std::shared_ptr<arrow::Schema>& read_schema,
         const std::vector<std::string>& needed_columns,
-        const std::string& predicate);
+        const std::string& predicate,
+        const std::shared_ptr<const api::Properties>& properties = nullptr);
 
     static folly::SemiFuture<arrow::Result<std::shared_ptr<LanceTableReader>>> create_from_metadata_async(
         MetadataPtr metadata,
         const milvus_storage::api::ColumnGroupFile& file,
         const std::shared_ptr<arrow::Schema>& read_schema,
         const std::vector<std::string>& needed_columns,
-        const std::string& predicate);
+        const std::string& predicate,
+        const std::shared_ptr<const api::Properties>& properties = nullptr);
   };
 
   [[nodiscard]] arrow::Status open() override;
@@ -146,14 +148,19 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
       const std::shared_ptr<const api::Properties>& properties,
       uint64_t version);
 
+  arrow::Status set_fragment_metadata(const std::shared_ptr<const MetaTrait::FragmentMetadata>& metadata);
+
   folly::SemiFuture<arrow::Status> open_fragment_async(
       const std::shared_ptr<const MetaTrait::FragmentMetadata>& metadata);
 
   LanceTableReader(MetaTrait::MetadataPtr metadata,
                    uint64_t fragment_id,
                    const std::shared_ptr<arrow::Schema>& schema,
-                   const std::vector<std::string>& needed_columns = {});
+                   const std::vector<std::string>& needed_columns,
+                   const std::shared_ptr<const api::Properties>& properties);
 
+  // Release native state before unpinning its Dataset metadata.
+  MetaTrait::MetadataPtr metadata_;
   // Keep the filesystem alive until all Rust-backed reader members are destroyed.
   std::shared_ptr<arrow::fs::FileSystem> filesystem_;
   std::shared_ptr<BlockingDataset> dataset_;

@@ -154,7 +154,8 @@ arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupLazyReaderImpl<ReaderT>::open
   }
 
   auto file = column_group_->files[file_index];
-  if (!cache_.enabled()) {
+  const auto key = cache_.enabled() && !key_retriever_ ? ReaderT::MetaTrait::cache_key(file) : std::string{};
+  if (key.empty()) {
     ARROW_ASSIGN_OR_RAISE(auto reader, FormatReader::create(schema_, column_group_->format, file, properties_,
                                                             needed_columns_, key_retriever_));
     auto typed_reader = std::dynamic_pointer_cast<ReaderT>(reader);
@@ -164,11 +165,12 @@ arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupLazyReaderImpl<ReaderT>::open
     }
     return typed_reader;
   } else {
-    auto key = ReaderT::MetaTrait::cache_key(file);
-    ARROW_ASSIGN_OR_RAISE(auto metadata, cache_.get<ReaderT>()->get_or_open(key, [this, file]() {
-      return FormatReader::load_metadata<ReaderT>(file, properties_, key_retriever_);
-    }));
-    return FormatReader::create_from_metadata<ReaderT>(metadata, file, schema_, needed_columns_, "");
+    ARROW_ASSIGN_OR_RAISE(
+        auto metadata,
+        cache_.get<ReaderT>()->get_or_open(
+            key, [this, file]() { return FormatReader::load_metadata<ReaderT>(file, properties_, key_retriever_); },
+            file.Get<uint64_t>(api::kPropertyFooterSize)));
+    return FormatReader::create_from_metadata<ReaderT>(metadata, file, schema_, needed_columns_, "", properties_);
   }
 
   return arrow::Status::Invalid("Unreachable code");
@@ -183,7 +185,8 @@ ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file_async(size_t file_index
   }
 
   auto file = column_group_->files[file_index];
-  if (!cache_.enabled()) {
+  const auto key = cache_.enabled() && !key_retriever_ ? ReaderT::MetaTrait::cache_key(file) : std::string{};
+  if (key.empty()) {
     // No cache: create a fresh reader and let the format decide whether open is native async.
     return FormatReader::create_async(schema_, column_group_->format, file, properties_, needed_columns_,
                                       key_retriever_)
@@ -203,18 +206,19 @@ ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file_async(size_t file_index
     // Cache immutable file metadata only; every take task still receives its
     // own reader with task-specific projection state.
     auto typed_cache = cache_.get<ReaderT>();
-    auto key = ReaderT::MetaTrait::cache_key(file);
     return typed_cache
-        ->get_or_open_async(key,
-                            [file, properties = properties_, key_retriever = key_retriever_]() {
-                              return ReaderT::MetaTrait::load_metadata_async(file, properties, key_retriever);
-                            })
-        .deferValue([file, read_schema = schema_, needed_columns = needed_columns_](
+        ->get_or_open_async(
+            key,
+            [file, properties = properties_, key_retriever = key_retriever_]() {
+              return ReaderT::MetaTrait::load_metadata_async(file, properties, key_retriever);
+            },
+            file.Get<uint64_t>(api::kPropertyFooterSize))
+        .deferValue([file, read_schema = schema_, needed_columns = needed_columns_, properties = properties_](
                         arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>&& metadata_result)
                         -> folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> {
           FOLLY_ARROW_ASSIGN_OR_RAISE(auto metadata, std::move(metadata_result));
           return ReaderT::MetaTrait::create_from_metadata_async(std::move(metadata), file, read_schema, needed_columns,
-                                                                "");
+                                                                "", properties);
         });
   }
 
@@ -378,10 +382,6 @@ arrow::Result<std::unique_ptr<ColumnGroupLazyReader>> ColumnGroupLazyReader::cre
   auto create_reader = [&](const milvus_storage::MetadataCache& metadata_cache) {
     return metadata_cache.dispatch(
         column_group->format, [&](auto typed_cache) -> arrow::Result<std::unique_ptr<ColumnGroupLazyReader>> {
-          if (!typed_cache) {
-            return arrow::Status::Invalid("Format reader metadata cache is null");
-          }
-
           using TypedCache = typename decltype(typed_cache)::element_type;
           using ReaderT = typename TypedCache::ReaderType;
           return std::make_unique<ColumnGroupLazyReaderImpl<ReaderT>>(out_schema, column_group, properties,

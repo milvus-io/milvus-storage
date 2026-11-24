@@ -64,8 +64,12 @@ arrow::Status TranslatePaimonStreamStatus(arrow::Status status) {
 
 class PaimonStreamReader final : public arrow::RecordBatchReader {
   public:
-  PaimonStreamReader(std::shared_ptr<arrow::RecordBatchReader> inner, std::shared_ptr<arrow::Schema> output_schema)
-      : inner_(std::move(inner)), output_schema_(std::move(output_schema)) {}
+  PaimonStreamReader(std::shared_ptr<arrow::RecordBatchReader> inner,
+                     std::shared_ptr<arrow::Schema> output_schema,
+                     std::shared_ptr<const void> metadata_owner)
+      : metadata_owner_(std::move(metadata_owner)),
+        inner_(std::move(inner)),
+        output_schema_(std::move(output_schema)) {}
 
   std::shared_ptr<arrow::Schema> schema() const override { return output_schema_; }
 
@@ -96,6 +100,8 @@ class PaimonStreamReader final : public arrow::RecordBatchReader {
   arrow::Status Close() override { return TranslatePaimonStreamStatus(inner_->Close()); }
 
   private:
+  // Release the native stream before returning its metadata Pin to the cache.
+  std::shared_ptr<const void> metadata_owner_;
   std::shared_ptr<arrow::RecordBatchReader> inner_;
   std::shared_ptr<arrow::Schema> output_schema_;
 };
@@ -129,8 +135,9 @@ arrow::Status MakePaimonBridgeErrorStatus(std::string_view message) {
 
 namespace internal {
 std::shared_ptr<arrow::RecordBatchReader> WrapPaimonRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner,
-                                                                      std::shared_ptr<arrow::Schema> output_schema) {
-  return std::make_shared<PaimonStreamReader>(std::move(inner), std::move(output_schema));
+                                                                      std::shared_ptr<arrow::Schema> output_schema,
+                                                                      std::shared_ptr<const void> metadata_owner) {
+  return std::make_shared<PaimonStreamReader>(std::move(inner), std::move(output_schema), std::move(metadata_owner));
 }
 }  // namespace internal
 

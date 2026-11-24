@@ -233,7 +233,8 @@ arrow::Result<std::shared_ptr<IcebergFormatReader>> IcebergFormatReader::MetaTra
     const api::ColumnGroupFile& file,
     const std::shared_ptr<arrow::Schema>& read_schema,
     const std::vector<std::string>& needed_columns,
-    const std::string& predicate) {
+    const std::string& predicate,
+    const std::shared_ptr<const api::Properties>& properties) {
   if (!metadata) {
     return arrow::Status::Invalid("Cannot open Iceberg reader from null metadata");
   }
@@ -242,19 +243,23 @@ arrow::Result<std::shared_ptr<IcebergFormatReader>> IcebergFormatReader::MetaTra
         fmt::format("Cannot open Iceberg reader from metadata without Parquet metadata. [path={}]", metadata->path));
   }
 
-  ARROW_ASSIGN_OR_RAISE(auto inner_reader,
-                        parquet::ParquetFormatReader::MetaTrait::create_from_metadata(
-                            metadata->payload.data_metadata, file, read_schema, needed_columns, predicate));
+  const auto& reader_properties = properties ? properties : metadata->payload.properties;
+  ARROW_ASSIGN_OR_RAISE(auto inner_reader, parquet::ParquetFormatReader::MetaTrait::create_from_metadata(
+                                               parquet::ParquetFormatReader::MetaTrait::MetadataPtr(
+                                                   metadata, metadata->payload.data_metadata.get()),
+                                               file, read_schema, needed_columns, predicate, reader_properties));
   auto deleted_positions =
       metadata->payload.deleted_positions ? metadata->payload.deleted_positions : EmptyDeletedPositions();
   auto sorted_deletions =
       metadata->payload.sorted_deletions ? metadata->payload.sorted_deletions : MakeSortedDeletions(deleted_positions);
   ARROW_ASSIGN_OR_RAISE(auto projected_schema, build_projected_schema(metadata->file_schema, needed_columns));
 
-  return std::shared_ptr<IcebergFormatReader>(new IcebergFormatReader(
-      std::move(inner_reader), metadata->payload.data_file_uri, metadata->payload.properties,
-      metadata->payload.delete_metadata, std::move(deleted_positions), std::move(sorted_deletions),
-      metadata->row_group_infos, needed_columns, std::move(projected_schema)));
+  auto reader = std::shared_ptr<IcebergFormatReader>(new IcebergFormatReader(
+      std::move(inner_reader), metadata->payload.data_file_uri, reader_properties, metadata->payload.delete_metadata,
+      std::move(deleted_positions), std::move(sorted_deletions), metadata->row_group_infos, needed_columns,
+      std::move(projected_schema)));
+  reader->metadata_ = std::move(metadata);
+  return reader;
 }
 
 IcebergFormatReader::IcebergFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
@@ -510,14 +515,24 @@ arrow::Result<std::shared_ptr<arrow::Table>> IcebergFormatReader::take(const std
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> IcebergFormatReader::read_with_range(
     const uint64_t& start_offset, const uint64_t& end_offset) {
+  const auto retain_metadata = [metadata = metadata_](std::shared_ptr<arrow::RecordBatchReader> stream) {
+    if (!metadata) {
+      return stream;
+    }
+    auto owner = std::make_shared<std::pair<MetaTrait::MetadataPtr, std::shared_ptr<arrow::RecordBatchReader>>>(
+        metadata, std::move(stream));
+    return std::shared_ptr<arrow::RecordBatchReader>(owner, owner->second.get());
+  };
   // Empty range — return immediately (e.g. all rows deleted)
   if (start_offset >= end_offset) {
     ARROW_ASSIGN_OR_RAISE(auto empty_batch, arrow::RecordBatch::MakeEmpty(output_schema()));
-    return arrow::RecordBatchReader::Make({empty_batch});
+    ARROW_ASSIGN_OR_RAISE(auto reader, arrow::RecordBatchReader::Make({empty_batch}));
+    return retain_metadata(std::move(reader));
   }
 
   if (!deleted_positions_ || deleted_positions_->empty()) {
-    return inner_reader_->read_with_range(start_offset, end_offset);
+    ARROW_ASSIGN_OR_RAISE(auto reader, inner_reader_->read_with_range(start_offset, end_offset));
+    return retain_metadata(std::move(reader));
   }
 
   // Map logical range to physical range
@@ -532,7 +547,8 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> IcebergFormatReader::re
   ARROW_ASSIGN_OR_RAISE(auto batch, table->CombineChunksToBatch());
 
   ARROW_ASSIGN_OR_RAISE(auto filtered, filter_batch(batch, physical_start));
-  return arrow::RecordBatchReader::Make({filtered});
+  ARROW_ASSIGN_OR_RAISE(auto reader, arrow::RecordBatchReader::Make({filtered}));
+  return retain_metadata(std::move(reader));
 }
 
 std::shared_ptr<arrow::Schema> IcebergFormatReader::get_schema() const { return inner_reader_->get_schema(); }
@@ -544,9 +560,11 @@ arrow::Result<std::shared_ptr<FormatReader>> IcebergFormatReader::clone_reader()
     return arrow::Status::Invalid("Failed to clone inner ParquetFormatReader");
   }
 
-  return std::shared_ptr<FormatReader>(new IcebergFormatReader(
+  auto reader = std::shared_ptr<IcebergFormatReader>(new IcebergFormatReader(
       std::move(cloned_parquet), data_file_uri_, properties_, delete_metadata_, deleted_positions_, sorted_deletions_,
       logical_row_group_infos_, needed_columns_, projected_schema_));
+  reader->metadata_ = metadata_;
+  return reader;
 }
 
 }  // namespace milvus_storage::iceberg

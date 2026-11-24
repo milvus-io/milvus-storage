@@ -385,4 +385,49 @@ TEST_F(ExtendStatusTest, ExtendStatusConvertsToSegcoreError) {
     EXPECT_NE(std::string(error.what()).find("AwsErrorConflict"), std::string::npos);
   }
 }
+
+TEST_F(ExtendStatusTest, ExternalErrorsPreserveCodeMessageAndArrowCategory) {
+  for (const auto code :
+       {milvus::MemAllocateFailed, milvus::InsufficientResource, milvus::InvalidParameter, milvus::OutOfRange,
+        milvus::FollyCancel, milvus::StorageTransientError, static_cast<milvus::ErrorCode>(2999)}) {
+    SCOPED_TRACE(static_cast<int>(code));
+    const milvus::SegcoreError original(code, "original common error: keep this message");
+    const auto status = ExtendStatusDetail::WrapFromSegcoreError(original);
+    EXPECT_TRUE(status.IsInvalid()) << status.ToString();
+    EXPECT_EQ(status.message(), original.what());
+    const auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_STREQ(detail->type_id(), "milvus_storage::ExtendStatusDetail");
+    EXPECT_EQ(detail->code(), ExtendStatusCode::SegcoreError);
+    ASSERT_TRUE(detail->segcore_error().has_value());
+    EXPECT_EQ(detail->segcore_error()->get_error_code(), original.get_error_code());
+    EXPECT_STREQ(detail->segcore_error()->what(), original.what());
+    EXPECT_NE(detail->ToString().find(std::to_string(static_cast<int>(code))), std::string::npos);
+    EXPECT_NE(detail->ToString().find(original.what()), std::string::npos);
+    const auto restored = ToSegcoreError(status);
+    EXPECT_EQ(restored.get_error_code(), original.get_error_code());
+    EXPECT_STREQ(restored.what(), original.what());
+  }
+
+  const auto success = ExtendStatusDetail::WrapFromSegcoreError(milvus::SegcoreError::success());
+  EXPECT_TRUE(success.ok());
+  EXPECT_EQ(success.detail(), nullptr);
+  EXPECT_TRUE(ToSegcoreError(success).ok());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(arrow::Status::Invalid("ordinary arrow error")), nullptr);
+  EXPECT_FALSE(ExtendStatusDetail::UnwrapStatus(MakeExtendError(ExtendStatusCode::PackedInvalidArgs, "invalid"))
+                   ->segcore_error()
+                   .has_value());
+}
+
+TEST_F(ExtendStatusTest, WrappedExternalErrorRetainsOriginalExternalClassification) {
+  const milvus::SegcoreError original(milvus::InsufficientResource, "original reservation rejection");
+  const auto cause = ExtendStatusDetail::WrapFromSegcoreError(original);
+  const auto wrapped = WrapExtendError(ExtendStatusCode::PackedUnexpected, "open metadata", cause);
+  EXPECT_EQ(wrapped.code(), cause.code());
+  EXPECT_EQ(wrapped.detail(), cause.detail());
+  EXPECT_NE(wrapped.message().find("open metadata"), std::string::npos);
+  const auto restored = ToSegcoreError(wrapped);
+  EXPECT_EQ(restored.get_error_code(), original.get_error_code());
+  EXPECT_STREQ(restored.what(), original.what());
+}
 }  // namespace milvus_storage::test

@@ -111,5 +111,8 @@ void loon_ffi_free_result(LoonFFIResult* result) {
 
 int loon_ffi_is_retryable_errcode(int err_code) {
   auto code = milvus_storage::ExtendStatusCodeFromInt(err_code);
-  return code.has_value() && milvus_storage::DefaultRetryableForExtendStatusCode(*code);
+  if (code.has_value()) {
+    return milvus_storage::DefaultRetryableForExtendStatusCode(*code);
+  }
+  return milvus_storage::DefaultRetryableForSegcoreErrorCode(err_code);
 }

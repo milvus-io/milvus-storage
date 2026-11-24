@@ -14,13 +14,17 @@
 
 #include "milvus-storage/format/format_reader_cache.h"
 
+#include <algorithm>
 #include <exception>
+#include <limits>
 #include <utility>
 
 #include <folly/ScopeGuard.h>
 #include <folly/Try.h>
 #include <glog/raw_logging.h>
 
+#include "cachinglayer/Manager.h"
+#include "cachinglayer/CacheSlot.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/format/paimon/paimon_format_reader.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
@@ -32,40 +36,116 @@ namespace milvus_storage {
 MetadataCache::MetadataCache(bool enabled) : enabled_(enabled) {}
 
 template <typename ReaderT>
-std::optional<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatReaderMetadataCache<ReaderT>::get(
-    const std::string& key) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = entries_.find(key);
-  if (it == entries_.end()) {
-    return std::nullopt;
+FormatReaderMetadataCache<ReaderT>::FormatReaderMetadataCache()
+    : cache_(milvus::cachinglayer::Manager::GetInstance().CreateCacheMap<std::string, MetadataPtr>()) {}
+
+template <typename ReaderT>
+typename FormatReaderMetadataCache<ReaderT>::MetadataResult FormatReaderMetadataCache<ReaderT>::FromPin(
+    typename KVCache::PinResult result) {
+  if (!result) {
+    return ExtendStatusDetail::WrapFromSegcoreError(result.error());
   }
-  return it->second.metadata;
+  auto pin = std::move(result).value();
+  if (!pin) {
+    return MetadataPtr{};
+  }
+  auto metadata = *pin;
+  try {
+    // Keep the existing MetadataPtr API while tying every copy to the cache Pin.
+    auto owner = std::make_shared<typename KVCache::Pin>(std::move(pin));
+    auto lease = std::make_shared<milvus::cachinglayer::PinWrapper<MetadataPtr>>(std::move(owner), std::move(metadata));
+    return MetadataPtr(std::move(lease), lease->get().get());
+  } catch (const std::bad_alloc& error) {
+    return arrow::Status::OutOfMemory(error.what());
+  }
 }
 
 template <typename ReaderT>
-arrow::Status FormatReaderMetadataCache<ReaderT>::add(
-    std::string key, typename FormatReaderMetadataCache<ReaderT>::MetadataPtr metadata) {
-  if (!metadata) {
-    return arrow::Status::Invalid("Cannot add null format reader metadata to cache");
-  }
+typename FormatReaderMetadataCache<ReaderT>::MetadataResult FormatReaderMetadataCache<ReaderT>::get(
+    const std::string& key) const {
+  return FromPin(cache_->Get(key));
+}
 
-  std::lock_guard<std::mutex> lock(mutex_);
-  entries_[std::move(key)] = Entry{std::move(metadata)};
-  return arrow::Status::OK();
+template <typename ReaderT>
+arrow::Result<typename FormatReaderMetadataCache<ReaderT>::ResourceUsage>
+FormatReaderMetadataCache<ReaderT>::reserve_for_load(const uint64_t estimated_bytes) const {
+  if (estimated_bytes > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    return arrow::Status::CapacityError("Format reader metadata estimate exceeds int64");
+  }
+  const ResourceUsage reservation{static_cast<int64_t>(estimated_bytes), 0};
+  if (estimated_bytes > 0) {
+    const auto admission = cache_->Reserve(reservation);
+    if (!admission) {
+      return ExtendStatusDetail::WrapFromSegcoreError(admission.error());
+    }
+  }
+  return reservation;
+}
+
+template <typename ReaderT>
+void FormatReaderMetadataCache<ReaderT>::release_load_reservation(const ResourceUsage reservation) const {
+  if (reservation.memory_bytes > 0) {
+    cache_->UnReserve(reservation);
+  }
+}
+
+template <typename ReaderT>
+typename FormatReaderMetadataCache<ReaderT>::MetadataResult FormatReaderMetadataCache<ReaderT>::publish(
+    MetadataPtr metadata, const ResourceUsage load_reservation) {
+  if (!metadata || metadata->cache_key.empty()) {
+    return arrow::Status::Invalid("Format reader metadata requires a value and a cache key");
+  }
+  const auto& key = metadata->cache_key;
+  const auto bytes = std::max<uint64_t>(metadata->cache_size, sizeof(typename Trait::Metadata));
+  if (bytes > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    return arrow::Status::CapacityError("Format reader metadata size exceeds int64");
+  }
+  const ResourceUsage usage{static_cast<int64_t>(bytes), 0};
+  const ResourceUsage extra{std::max<int64_t>(0, usage.memory_bytes - load_reservation.memory_bytes), 0};
+  bool reserved = false;
+  auto refund = folly::makeGuard([&] {
+    if (reserved) {
+      cache_->UnReserve(extra);
+    }
+  });
+  // Only a new entry needs any remaining bytes. A concurrent winner is pinned directly.
+  return FromPin(cache_->GetOrCreate(key, [&]() -> typename KVCache::CreateResult {
+    if (extra.memory_bytes > 0) {
+      const auto admission = cache_->Reserve(extra);
+      if (!admission) {
+        return folly::makeUnexpected(admission.error());
+      }
+      reserved = true;
+    }
+    return std::pair{std::make_unique<MetadataPtr>(std::move(metadata)), usage};
+  }));
+}
+
+template <typename ReaderT>
+arrow::Status FormatReaderMetadataCache<ReaderT>::add(MetadataPtr metadata) {
+  return publish(std::move(metadata)).status();
 }
 
 template <typename ReaderT>
 arrow::Result<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatReaderMetadataCache<ReaderT>::get_or_open(
-    const std::string& key, const typename FormatReaderMetadataCache<ReaderT>::MetadataLoader& load_fn) {
+    const std::string& key,
+    const typename FormatReaderMetadataCache<ReaderT>::MetadataLoader& load_fn,
+    const uint64_t estimated_bytes) {
+  ARROW_ASSIGN_OR_RAISE(auto cached, get(key));
+  if (cached) {
+    return cached;
+  }
   std::shared_ptr<InFlightLoad> in_flight_load;
   bool owns_in_flight_load = false;
   {
     std::unique_lock<std::mutex> lock(mutex_);
 
-    // Return cached immutable metadata without entering the singleflight path.
-    auto cached = entries_.find(key);
-    if (cached != entries_.end()) {
-      return cached->second.metadata;
+    // A previous flight may have published since the first lookup.
+    auto pin = cache_->Get(key);
+    if (!pin || *pin) {
+      // Unpin can notify waiters inline, including on a wrapper allocation failure.
+      lock.unlock();
+      return FromPin(std::move(pin));
     }
 
     // The first caller for a key becomes the sync leader. A sync follower may
@@ -92,66 +172,51 @@ arrow::Result<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatRe
 
   // Run the loader outside mutex_ so unrelated cache operations are not serialized
   // behind metadata I/O. The leader publishes both success and failure below.
-  auto status = arrow::Status::OK();
-  MetadataPtr metadata;
-  try {
-    auto load_result = load_fn();
-    status = load_result.status();
-    if (load_result.ok()) {
-      metadata = load_result.ValueOrDie();
-      if (!metadata) {
-        status = arrow::Status::Invalid("Format reader metadata loader returned null metadata");
-      }
+  auto result = [&]() -> MetadataResult {
+    try {
+      ARROW_ASSIGN_OR_RAISE(const auto reservation, reserve_for_load(estimated_bytes));
+      auto refund = folly::makeGuard([&] { release_load_reservation(reservation); });
+      ARROW_ASSIGN_OR_RAISE(auto metadata, load_fn());
+      return publish(std::move(metadata), reservation);
+    } catch (const std::exception& e) {
+      return arrow::Status::UnknownError("Exception while loading format reader metadata: ", e.what());
+    } catch (...) {
+      return arrow::Status::UnknownError("Unknown exception while loading format reader metadata");
     }
-  } catch (const std::exception& e) {
-    status = arrow::Status::UnknownError("Exception while loading format reader metadata: ", e.what());
-  } catch (...) {
-    status = arrow::Status::UnknownError("Unknown exception while loading format reader metadata");
-  }
+  }();
 
-  // The sync leader owns the InFlightLoad and must publish its result to all
-  // followers. An independent sync load must leave the async leader's marker
-  // and promise untouched, otherwise that leader could complete them twice.
+  // Only the leader completes the flight. Its reservation has already been returned.
   if (owns_in_flight_load) {
-    if (!status.ok()) {
-      return complete_load(key, in_flight_load, status);
-    }
-    return complete_load(key, in_flight_load, std::move(metadata));
+    return complete_load(key, in_flight_load, std::move(result));
   }
-
-  if (!status.ok()) {
-    // This bypass is intentionally independent of the async flight. Return its
-    // own load error without waiting for or completing the async leader.
-    return status;
-  }
-
-  // The async leader may have populated the cache while this independent load
-  // was running. Preserve the first successful cached value so both paths
-  // converge on one immutable metadata instance when both loads succeed.
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = entries_.try_emplace(key, Entry{std::move(metadata)}).first;
-  return it->second.metadata;
+  return result;
 }
 
 template <typename ReaderT>
 folly::SemiFuture<typename FormatReaderMetadataCache<ReaderT>::MetadataResult>
 FormatReaderMetadataCache<ReaderT>::get_or_open_async(
-    const std::string& key, const typename FormatReaderMetadataCache<ReaderT>::AsyncMetadataLoader& load_fn) {
+    const std::string& key,
+    const typename FormatReaderMetadataCache<ReaderT>::AsyncMetadataLoader& load_fn,
+    const uint64_t estimated_bytes) {
   // Keep the cache alive for the whole deferred operation. Lookup and loading do
   // not start until the returned SemiFuture is consumed.
   auto self = this->shared_from_this();
 
-  return folly::makeSemiFuture().deferValue([self = std::move(self), key,
-                                             load_fn](folly::Unit) -> folly::SemiFuture<MetadataResult> {
+  return folly::makeSemiFuture().deferValue([self = std::move(self), key, load_fn,
+                                             estimated_bytes](folly::Unit) -> folly::SemiFuture<MetadataResult> {
+    auto cached = self->get(key);
+    if (!cached.ok() || *cached) {
+      return folly::makeSemiFuture(std::move(cached));
+    }
     std::shared_ptr<InFlightLoad> in_flight_load;
     {
-      std::lock_guard<std::mutex> lock(self->mutex_);
+      std::unique_lock<std::mutex> lock(self->mutex_);
 
-      // Recheck the cache at execution time because another caller may have
-      // populated it after get_or_open_async() returned its deferred future.
-      auto cached = self->entries_.find(key);
-      if (cached != self->entries_.end()) {
-        return folly::makeSemiFuture(MetadataResult(cached->second.metadata));
+      // Recheck the cache before registering a new flight.
+      auto pin = self->cache_->Get(key);
+      if (!pin || *pin) {
+        lock.unlock();
+        return folly::makeSemiFuture(FromPin(std::move(pin)));
       }
 
       // Async followers subscribe to the leader's SharedPromise instead of
@@ -166,10 +231,17 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
     // Start the async loader outside mutex_. Its continuation normalizes and
     // publishes the result through the same path used by the synchronous leader.
     try {
-      auto load_future = load_fn();
+      // Copy the key before reserving so installing cleanup after a grant cannot allocate.
+      auto cleanup_key = key;
+      const auto admission = self->reserve_for_load(estimated_bytes);
+      if (!admission.ok()) {
+        return folly::makeSemiFuture(self->complete_load(key, in_flight_load, admission.status()));
+      }
+      const auto reservation = *admission;
       // Timed SemiFuture waits can discard their deferred continuation. Release
       // its flight and notify followers even when that continuation never runs.
-      auto cleanup = folly::makeGuard([self, key, in_flight_load]() noexcept {
+      auto cleanup = folly::makeGuard([self, key = std::move(cleanup_key), in_flight_load, reservation]() noexcept {
+        self->release_load_reservation(reservation);
         if (!in_flight_load->continuation_attached.load(std::memory_order_acquire)) {
           return;
         }
@@ -183,8 +255,9 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
                   error ? error->what() : "unknown exception");
         }
       });
+      auto load_future = load_fn();
       auto pending = std::move(load_future)
-                         .defer([self, key, in_flight_load, cleanup = std::move(cleanup)](
+                         .defer([self, key, in_flight_load, reservation, cleanup = std::move(cleanup)](
                                     folly::Try<MetadataResult>&& load_try) mutable -> MetadataResult {
                            MetadataResult result = [&]() -> MetadataResult {
                              if (load_try.hasException()) {
@@ -193,11 +266,12 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
                                    "Exception while asynchronously loading format reader metadata: ",
                                    std::string(message.data(), message.size()));
                              }
-                             return std::move(load_try).value();
+                             ARROW_ASSIGN_OR_RAISE(auto metadata, std::move(load_try).value());
+                             return self->publish(std::move(metadata), reservation);
                            }();
-                           auto completed = self->complete_load(key, in_flight_load, std::move(result));
                            cleanup.dismiss();
-                           return completed;
+                           self->release_load_reservation(reservation);
+                           return self->complete_load(key, in_flight_load, std::move(result));
                          });
       // Attachment failures belong to the catch below, not to cancellation.
       in_flight_load->continuation_attached.store(true, std::memory_order_release);
@@ -219,17 +293,7 @@ typename FormatReaderMetadataCache<ReaderT>::MetadataResult FormatReaderMetadata
     const std::string& key,
     const std::shared_ptr<InFlightLoad>& in_flight_load,
     typename FormatReaderMetadataCache<ReaderT>::MetadataResult load_result) {
-  // Normalize a successful-but-null loader result into an error before exposing
-  // it to the cache or any waiter.
-  auto status = load_result.status();
-  MetadataPtr metadata;
-  if (load_result.ok()) {
-    metadata = std::move(load_result).ValueOrDie();
-    if (!metadata) {
-      status = arrow::Status::Invalid("Format reader metadata loader returned null metadata");
-    }
-  }
-
+  const auto& status = load_result.status();
   {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -242,28 +306,10 @@ typename FormatReaderMetadataCache<ReaderT>::MetadataResult FormatReaderMetadata
       return in_flight_load->metadata;
     }
 
-    // Atomically publish successful metadata and mark this singleflight as done.
-    // A successful leader adopts an entry populated first by another successful
-    // path. A failed leader still completes its own waiters with that failure.
-    if (status.ok()) {
-      auto cached = entries_.find(key);
-      if (cached != entries_.end()) {
-        metadata = cached->second.metadata;
-      } else {
-        try {
-          entries_.emplace(key, Entry{metadata});
-        } catch (const std::exception& e) {
-          status = arrow::Status::UnknownError("Failed to cache format reader metadata: ", e.what());
-          metadata.reset();
-        } catch (...) {
-          status = arrow::Status::UnknownError("Unknown exception while caching format reader metadata");
-          metadata.reset();
-        }
-      }
-    }
-
     in_flight_load->status = status;
-    in_flight_load->metadata = metadata;
+    if (load_result.ok()) {
+      in_flight_load->metadata = *load_result;
+    }
     in_flight_load->done = true;
 
     // Erase only this flight: a newer retry for the same key must not be removed
@@ -278,16 +324,8 @@ typename FormatReaderMetadataCache<ReaderT>::MetadataResult FormatReaderMetadata
   in_flight_load->cv.notify_all();
 
   // Fulfill the shared result consumed by every asynchronous follower.
-  if (status.ok()) {
-    in_flight_load->async_result.setValue(MetadataResult(metadata));
-  } else {
-    in_flight_load->async_result.setValue(MetadataResult(status));
-  }
-
-  if (!status.ok()) {
-    return status;
-  }
-  return metadata;
+  in_flight_load->async_result.setValue(load_result);
+  return load_result;
 }
 
 template class FormatReaderMetadataCache<parquet::ParquetFormatReader>;

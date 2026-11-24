@@ -507,7 +507,8 @@ arrow::Result<std::shared_ptr<ParquetFormatReader>> ParquetFormatReader::MetaTra
     const api::ColumnGroupFile& file,
     const std::shared_ptr<arrow::Schema>& /*read_schema*/,
     const std::vector<std::string>& needed_columns,
-    const std::string& /*predicate*/) {
+    const std::string& /*predicate*/,
+    const std::shared_ptr<const api::Properties>& properties) {
   if (!metadata) {
     return arrow::Status::Invalid("Cannot open parquet reader from null metadata");
   }
@@ -525,19 +526,25 @@ arrow::Result<std::shared_ptr<ParquetFormatReader>> ParquetFormatReader::MetaTra
     parquet_metadata = metadata->payload.parquet_metadata;
   }
 
+  const auto& reader_properties = properties ? properties : metadata->payload.properties;
   const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
   const auto footer_size = file.Get<uint64_t>(api::kPropertyFooterSize);
 
   ARROW_ASSIGN_OR_RAISE(
       auto file_reader,
-      create_parquet_file_reader(metadata->payload.fs, metadata->path, metadata->payload.properties,
+      create_parquet_file_reader(metadata->payload.fs, metadata->path, reader_properties,
                                  metadata->payload.key_retriever, std::move(parquet_metadata), file_size, footer_size));
 
   auto reader =
-      std::make_shared<ParquetFormatReader>(metadata->payload.fs, metadata->path, metadata->payload.properties,
-                                            needed_columns, metadata->payload.key_retriever, file_size, footer_size);
+      std::make_shared<ParquetFormatReader>(metadata->payload.fs, metadata->path, reader_properties, needed_columns,
+                                            metadata->payload.key_retriever, file_size, footer_size);
+  reader->metadata_ = metadata;
   reader->schema_ = metadata->file_schema;
-  reader->file_reader_ = std::shared_ptr<::parquet::arrow::FileReader>(std::move(file_reader));
+  // Streams and Arrow generators already retain file_reader_; let that shared
+  // handle keep the Pin until the final use of the parsed footer is complete.
+  auto owner = std::make_shared<std::pair<MetadataPtr, std::shared_ptr<::parquet::arrow::FileReader>>>(
+      metadata, std::move(file_reader));
+  reader->file_reader_ = std::shared_ptr<::parquet::arrow::FileReader>(owner, owner->second.get());
   ARROW_RETURN_NOT_OK(reader->set_needed_columns(needed_columns));
   ARROW_ASSIGN_OR_RAISE(reader->row_group_infos_,
                         create_row_group_infos_from_metadata(reader->file_reader_->parquet_reader()->metadata(),
@@ -551,14 +558,15 @@ ParquetFormatReader::MetaTrait::create_from_metadata_async(MetadataPtr metadata,
                                                            const api::ColumnGroupFile& file,
                                                            const std::shared_ptr<arrow::Schema>& read_schema,
                                                            const std::vector<std::string>& needed_columns,
-                                                           const std::string& predicate) {
+                                                           const std::string& predicate,
+                                                           const std::shared_ptr<const api::Properties>& properties) {
   // A non-null key retriever identifies encrypted Parquet in this codebase. Encrypted
   // metadata reconstruction intentionally uses this deferred synchronous fallback;
   // the non-blocking async-open guarantee applies only to unencrypted files.
   return folly::makeSemiFuture().deferValue(
-      [metadata = std::move(metadata), file, read_schema, needed_columns,
-       predicate](folly::Unit) -> arrow::Result<std::shared_ptr<ParquetFormatReader>> {
-        return create_from_metadata(std::move(metadata), file, read_schema, needed_columns, predicate);
+      [metadata = std::move(metadata), file, read_schema, needed_columns, predicate,
+       properties](folly::Unit) -> arrow::Result<std::shared_ptr<ParquetFormatReader>> {
+        return create_from_metadata(std::move(metadata), file, read_schema, needed_columns, predicate, properties);
       });
 }
 
@@ -1441,7 +1449,8 @@ arrow::Result<std::shared_ptr<FormatReader>> ParquetFormatReader::clone_reader()
 
 ParquetFormatReader::ParquetFormatReader(const ParquetFormatReader& other,
                                          std::shared_ptr<::parquet::arrow::FileReader> cloned_file_reader)
-    : path_(other.path_),
+    : metadata_(other.metadata_),
+      path_(other.path_),
       fs_(other.fs_),
       schema_(other.schema_),
       properties_(other.properties_),
@@ -1451,7 +1460,13 @@ ParquetFormatReader::ParquetFormatReader(const ParquetFormatReader& other,
       footer_size_(other.footer_size_),
       projected_leaf_column_indices_(other.projected_leaf_column_indices_),
       row_group_infos_(other.row_group_infos_),
-      file_reader_(std::move(cloned_file_reader)) {}
+      file_reader_(std::move(cloned_file_reader)) {
+  if (metadata_) {
+    auto owner = std::make_shared<std::pair<MetaTrait::MetadataPtr, std::shared_ptr<::parquet::arrow::FileReader>>>(
+        metadata_, std::move(file_reader_));
+    file_reader_ = std::shared_ptr<::parquet::arrow::FileReader>(owner, owner->second.get());
+  }
+}
 
 folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>> ParquetFormatReader::read_with_range_async(
     uint64_t start_offset, uint64_t end_offset) {

@@ -53,7 +53,8 @@ class IcebergFormatReader final : public FormatReader {
         const api::ColumnGroupFile& file,
         const std::shared_ptr<arrow::Schema>& read_schema,
         const std::vector<std::string>& needed_columns,
-        const std::string& predicate);
+        const std::string& predicate,
+        const std::shared_ptr<const api::Properties>& properties = nullptr);
   };
 
   IcebergFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
@@ -110,6 +111,8 @@ class IcebergFormatReader final : public FormatReader {
   /// Map a logical row offset to a physical row offset, accounting for deletions.
   int64_t logical_to_physical(int64_t logical_offset) const;
 
+  // Keep the outer metadata Pin through nested readers and their streams.
+  MetaTrait::MetadataPtr metadata_;
   std::shared_ptr<parquet::ParquetFormatReader> inner_reader_;
   std::string data_file_uri_;
   std::vector<uint8_t> delete_metadata_;

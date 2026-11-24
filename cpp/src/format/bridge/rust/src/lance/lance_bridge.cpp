@@ -29,7 +29,9 @@ namespace {
 
 class LanceErrorTranslatingReader final : public arrow::RecordBatchReader {
   public:
-  explicit LanceErrorTranslatingReader(std::shared_ptr<arrow::RecordBatchReader> inner) : inner_(std::move(inner)) {}
+  LanceErrorTranslatingReader(std::shared_ptr<arrow::RecordBatchReader> inner,
+                              std::shared_ptr<const void> metadata_owner)
+      : metadata_owner_(std::move(metadata_owner)), inner_(std::move(inner)) {}
 
   std::shared_ptr<arrow::Schema> schema() const override { return inner_->schema(); }
 
@@ -38,6 +40,8 @@ class LanceErrorTranslatingReader final : public arrow::RecordBatchReader {
   arrow::Status Close() override;
 
   private:
+  // Release the native stream before returning its metadata Pin to the cache.
+  std::shared_ptr<const void> metadata_owner_;
   std::shared_ptr<arrow::RecordBatchReader> inner_;
 };
 
@@ -54,8 +58,9 @@ arrow::Status LanceErrorTranslatingReader::Close() {
 
 namespace internal {
 
-std::shared_ptr<arrow::RecordBatchReader> WrapLanceRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner) {
-  return std::make_shared<LanceErrorTranslatingReader>(std::move(inner));
+std::shared_ptr<arrow::RecordBatchReader> WrapLanceRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner,
+                                                                     std::shared_ptr<const void> metadata_owner) {
+  return std::make_shared<LanceErrorTranslatingReader>(std::move(inner), std::move(metadata_owner));
 }
 
 }  // namespace internal

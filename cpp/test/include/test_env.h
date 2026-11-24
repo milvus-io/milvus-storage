@@ -65,6 +65,11 @@
 #define ASSERT_AND_ASSIGN(lhs, rexpr) ASSERT_AND_ASSIGN_IMPL(CONCAT(_tmp_value, __COUNTER__), lhs, rexpr);
 
 namespace milvus_storage {
+// Shared Manager budget used only by metadata cache tests.
+inline constexpr int64_t kTestMetadataCacheBytes = 64 * 1024 * 1024;
+void InitMetadataCacheForTests();
+arrow::Status EvictUnpinnedMetadataForTests();
+
 /// Returns whether integration tests are configured to use remote storage.
 ///
 /// Only TEST_ENV_STORAGE_TYPE="remote" is treated as a cloud environment.

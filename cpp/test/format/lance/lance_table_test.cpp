@@ -472,11 +472,18 @@ class LanceBasicTest : public ::testing::Test {
   };
 
   void SetUp() override {
+    InitMetadataCacheForTests();
+    // Shared metadata also keeps the filesystem's Lance scheduler alive. Start
+    // each fixture cold so metrics belong to the Dataset created by this test.
+    ASSERT_STATUS_OK(EvictUnpinnedMetadataForTests());
     ASSERT_STATUS_OK(InitTestProperties(properties_));
     ASSERT_AND_ASSIGN(fs_, GetFileSystem(std::make_shared<const api::Properties>(properties_)));
 
     // For Arrow filesystem operations
-    arrow_base_path_ = GetTestBasePath("lance-fragment-test");
+    // Global metadata can outlive this fixture; each dataset URI identifies one
+    // immutable history rather than reusing another test's snapshot numbers.
+    arrow_base_path_ = GetTestBasePath(std::string("lance-fragment-test-") +
+                                       ::testing::UnitTest::GetInstance()->current_test_info()->name());
     ASSERT_STATUS_OK(DeleteTestDir(fs_, arrow_base_path_));
     ASSERT_STATUS_OK(CreateTestDir(fs_, arrow_base_path_));
 
@@ -1374,6 +1381,20 @@ TEST_F(LanceBasicTest, InvalidUriCacheKeyDoesNotCollideWithBaseUri) {
   valid_file.path = MakeLanceUri(base_path_, 0);
 
   EXPECT_NE(LanceTableReader::MetaTrait::cache_key(invalid_file), LanceTableReader::MetaTrait::cache_key(valid_file));
+
+  valid_file.properties[kDatasetVersionProperty] = "1";
+  const auto first_version = LanceTableReader::MetaTrait::cache_key(valid_file);
+  valid_file.properties[kDatasetVersionProperty] = "2";
+  const auto second_version = LanceTableReader::MetaTrait::cache_key(valid_file);
+  EXPECT_NE(first_version, second_version);
+  valid_file.path = MakeLanceUri(base_path_, 1);
+  EXPECT_EQ(second_version, LanceTableReader::MetaTrait::cache_key(valid_file));
+  valid_file.properties.erase(kDatasetVersionProperty);
+  EXPECT_TRUE(LanceTableReader::MetaTrait::cache_key(valid_file).empty());
+  for (const auto* version : {"0", "invalid"}) {
+    valid_file.properties[kDatasetVersionProperty] = version;
+    EXPECT_TRUE(LanceTableReader::MetaTrait::cache_key(valid_file).empty());
+  }
 }
 
 TEST_F(LanceBasicTest, ExploreCarriesDatasetSnapshotVersion) {
@@ -1431,12 +1452,14 @@ TEST_F(LanceBasicTest, SeparateTopLevelReaderCachesShareSameDatasetSnapshot) {
 
   MetadataCache first_reader_cache;
   MetadataCache second_reader_cache;
+  const auto first_cache = first_reader_cache.get<LanceTableReader>();
+  const auto second_cache = second_reader_cache.get<LanceTableReader>();
   const auto key = LanceTableReader::MetaTrait::cache_key(files[0]);
-  ASSERT_AND_ASSIGN(auto first_metadata, first_reader_cache.get<LanceTableReader>()->get_or_open(key, [&]() {
+  ASSERT_AND_ASSIGN(auto first_metadata, first_cache->get_or_open(key, [&]() {
     return LanceTableReader::MetaTrait::load_metadata(files[0], std::make_shared<const api::Properties>(properties_),
                                                       nullptr /* key_retriever */);
   }));
-  ASSERT_AND_ASSIGN(auto second_metadata, second_reader_cache.get<LanceTableReader>()->get_or_open(key, [&]() {
+  ASSERT_AND_ASSIGN(auto second_metadata, second_cache->get_or_open(key, [&]() {
     return LanceTableReader::MetaTrait::load_metadata(files[0], std::make_shared<const api::Properties>(properties_),
                                                       nullptr /* key_retriever */);
   }));
@@ -1675,6 +1698,9 @@ TEST_F(LanceBasicTest, DifferentFragmentsShareDatasetMetadata) {
   ASSERT_AND_ASSIGN(auto second_file, second_writer.Close());
   ASSERT_NE(first_file.path, second_file.path);
 
+  // Both fragments are read from the second committed dataset snapshot.
+  first_file.properties[kDatasetVersionProperty] = "2";
+  second_file.properties[kDatasetVersionProperty] = "2";
   const std::vector<api::ColumnGroupFile> files = {std::move(first_file), std::move(second_file)};
   auto cache = FormatReaderMetadataCache<LanceTableReader>::Make();
   size_t metadata_load_count = 0;
@@ -1778,7 +1804,7 @@ TEST_F(LanceBasicTest, DifferentFilesystemCacheKeysDoNotShareDataset) {
   EXPECT_NE(first_metadata->payload.dataset.get(), alternate_metadata->payload.dataset.get());
 }
 
-TEST_F(LanceBasicTest, SeparateTopLevelReaderCachesDoNotShareDataset) {
+TEST_F(LanceBasicTest, SharedMetadataCacheSeparatesDatasetVersions) {
   if (IsCloudEnv()) {
     GTEST_SKIP() << "Focused dataset-cache test uses the local Lance fixture.";
   }
@@ -1786,12 +1812,14 @@ TEST_F(LanceBasicTest, SeparateTopLevelReaderCachesDoNotShareDataset) {
   LanceTableWriter first_writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(first_writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto first_file, first_writer.Close());
+  first_file.properties[kDatasetVersionProperty] = "1";
   const auto key = LanceTableReader::MetaTrait::cache_key(first_file);
 
-  // ReaderImpl owns one MetadataCache. Independent handles here model two
-  // top-level readers with independent Dataset metadata.
+  // Independent accessors share one cache. Snapshot versions, rather than
+  // Reader ownership, isolate different versions of the same dataset.
   MetadataCache first_reader_cache;
-  ASSERT_AND_ASSIGN(auto first_metadata, first_reader_cache.get<LanceTableReader>()->get_or_open(key, [&]() {
+  const auto first_cache = first_reader_cache.get<LanceTableReader>();
+  ASSERT_AND_ASSIGN(auto first_metadata, first_cache->get_or_open(key, [&]() {
     return LanceTableReader::MetaTrait::load_metadata(first_file, std::make_shared<const api::Properties>(properties_),
                                                       nullptr /* key_retriever */);
   }));
@@ -1799,10 +1827,12 @@ TEST_F(LanceBasicTest, SeparateTopLevelReaderCachesDoNotShareDataset) {
   LanceTableWriter second_writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(second_writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto second_file, second_writer.Close());
-  ASSERT_EQ(key, LanceTableReader::MetaTrait::cache_key(second_file));
+  second_file.properties[kDatasetVersionProperty] = "2";
+  const auto second_key = LanceTableReader::MetaTrait::cache_key(second_file);
+  ASSERT_NE(key, second_key);
 
-  ASSERT_AND_ASSIGN(auto first_metadata_again, first_reader_cache.get<LanceTableReader>()->get_or_open(key, [&]() {
-    return LanceTableReader::MetaTrait::load_metadata(second_file, std::make_shared<const api::Properties>(properties_),
+  ASSERT_AND_ASSIGN(auto first_metadata_again, first_cache->get_or_open(key, [&]() {
+    return LanceTableReader::MetaTrait::load_metadata(first_file, std::make_shared<const api::Properties>(properties_),
                                                       nullptr /* key_retriever */);
   }));
   ASSERT_EQ(first_metadata.get(), first_metadata_again.get());
@@ -1811,7 +1841,8 @@ TEST_F(LanceBasicTest, SeparateTopLevelReaderCachesDoNotShareDataset) {
   EXPECT_FALSE(stale_fragment_result.ok());
 
   MetadataCache second_reader_cache;
-  ASSERT_AND_ASSIGN(auto second_metadata, second_reader_cache.get<LanceTableReader>()->get_or_open(key, [&]() {
+  const auto second_cache = second_reader_cache.get<LanceTableReader>();
+  ASSERT_AND_ASSIGN(auto second_metadata, second_cache->get_or_open(second_key, [&]() {
     return LanceTableReader::MetaTrait::load_metadata(second_file, std::make_shared<const api::Properties>(properties_),
                                                       nullptr /* key_retriever */);
   }));
@@ -1829,9 +1860,10 @@ TEST_F(LanceBasicTest, SameFragmentMetadataIsReusedWithinReaderCache) {
   LanceTableWriter writer(base_path_, schema_, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(test_batch_));
   ASSERT_AND_ASSIGN(auto file, writer.Close());
+  file.properties[kDatasetVersionProperty] = "1";
 
   MetadataCache reader_cache;
-  auto cache = reader_cache.get<LanceTableReader>();
+  const auto cache = reader_cache.get<LanceTableReader>();
   const auto key = LanceTableReader::MetaTrait::cache_key(file);
   size_t metadata_load_count = 0;
   auto load_metadata = [&]() -> arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> {
@@ -2124,6 +2156,7 @@ TEST_F(LanceBasicTest, EstimatesAndProjectedReadersShareFileMetadata) {
   LanceTableWriter writer(base_path_, schema, std::make_shared<const api::Properties>(properties_));
   ASSERT_STATUS_OK(writer.Write(batch));
   ASSERT_AND_ASSIGN(auto file, writer.Close());
+  file.properties[kDatasetVersionProperty] = "1";
   auto column_group = std::make_shared<api::ColumnGroup>();
   column_group->columns = schema->field_names();
   column_group->format = LOON_FORMAT_LANCE_TABLE;
@@ -2140,7 +2173,7 @@ TEST_F(LanceBasicTest, EstimatesAndProjectedReadersShareFileMetadata) {
   const auto first_projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{fields[0]->name()});
   ASSERT_AND_ASSIGN(auto first_reader, reader->get_chunk_reader(0, first_projection));
   ASSERT_GT(metrics->GetReadBytes(), 0);
-  // The top-level Reader, rather than this first ChunkReader, owns the footers.
+  // The shared cache retains the footers after this ChunkReader is released.
   first_reader.reset();
 
   for (const bool concurrent : {false, true}) {
@@ -2371,6 +2404,7 @@ TEST_F(LanceBasicTest, EstimatedMemoryAccountsForDeletions) {
   ASSERT_AND_ASSIGN(auto metrics, std::dynamic_pointer_cast<Observable>(fs_)->GetMetrics(kOriginMetricsSource));
   for (const bool async_first : {false, true}) {
     SCOPED_TRACE(async_first ? "async cold open" : "sync cold open");
+    ASSERT_STATUS_OK(EvictUnpinnedMetadataForTests());
     auto cached_reader = api::Reader::create(column_groups, schema, nullptr, properties);
     deletion_metrics->Reset();
     ASSERT_AND_ASSIGN(auto first, async_first ? cached_reader->get_chunk_reader_async(0, ids).get()

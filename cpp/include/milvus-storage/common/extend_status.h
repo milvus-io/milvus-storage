@@ -37,6 +37,10 @@ enum class ExtendStatusCode : char {
   PackedFileCorrupted = 53,
   PackedArrowError = 54,
   PackedUnexpected = 55,
+  // Internal tag for wrapped milvus-common errors, carried as Arrow Invalid.
+  // ExtendStatusDetail::segcore_error() owns the original common code/message.
+  // C++ and FFI export that original code; retryable() is derived from it.
+  SegcoreError = 56,
 
   AwsErrorNoSuchUpload = LOON_AWS_ERROR_NO_SUCH_UPLOAD,
   AwsErrorConflict = LOON_AWS_ERROR_CONFLICT,
@@ -78,6 +82,8 @@ class ExtendStatusDetail : public arrow::StatusDetail {
 
   [[nodiscard]] bool retryable() const;
 
+  [[nodiscard]] const std::optional<milvus::SegcoreError>& segcore_error() const;
+
   /// \brief Get the human-readable name of the status code.
   [[nodiscard]] std::string CodeAsString() const;
 
@@ -91,14 +97,18 @@ class ExtendStatusDetail : public arrow::StatusDetail {
   /// nullptr otherwise
   static std::shared_ptr<ExtendStatusDetail> UnwrapStatus(const arrow::Status& status);
 
+  static arrow::Status WrapFromSegcoreError(const milvus::SegcoreError& error);
+
   private:
   ExtendStatusCode code_;
   std::string extra_info_;
   bool retryable_ = false;
+  std::optional<milvus::SegcoreError> segcore_error_;
 };
 
 std::optional<ExtendStatusCode> ExtendStatusCodeFromInt(int code);
 bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code);
+bool DefaultRetryableForSegcoreErrorCode(int code);
 
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info = "");
 

@@ -13,6 +13,7 @@
 // limitations under the License.
 #include "milvus-storage/common/extend_status.h"
 
+#include <cassert>
 #include <cerrno>
 #include <memory>
 #include <optional>
@@ -42,6 +43,7 @@ constexpr ExtendStatusCodeMetadata kExtendStatusCodeMetadata[] = {
     {ExtendStatusCode::PackedFileCorrupted, "PackedFileCorrupted", false},
     {ExtendStatusCode::PackedArrowError, "PackedArrowError", false},
     {ExtendStatusCode::PackedUnexpected, "PackedUnexpected", false},
+    {ExtendStatusCode::SegcoreError, "SegcoreError", false},
     {ExtendStatusCode::AwsErrorNoSuchUpload, "AwsErrorNoSuchUpload", true},
     {ExtendStatusCode::AwsErrorConflict, "AwsErrorConflict", false},
     {ExtendStatusCode::AwsErrorPreConditionFailed, "AwsErrorPreConditionFailed", false},
@@ -93,7 +95,12 @@ std::string ExtendStatusDetail::extra_info() const { return extra_info_; }
 
 bool ExtendStatusDetail::retryable() const { return retryable_; }
 
+const std::optional<milvus::SegcoreError>& ExtendStatusDetail::segcore_error() const { return segcore_error_; }
+
 std::string ExtendStatusDetail::CodeAsString() const {
+  if (segcore_error_) {
+    return fmt::format("SegcoreError({})", static_cast<int>(segcore_error_->get_error_code()));
+  }
   if (const auto* metadata = FindExtendStatusCodeMetadata(code()); metadata != nullptr) {
     return std::string(metadata->name);
   }
@@ -123,10 +130,43 @@ bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code) {
   return false;
 }
 
+bool DefaultRetryableForSegcoreErrorCode(int code) {
+  // Match the common-code retry policy in Milvus pkg/util/merr/segcore.go.
+  switch (code) {
+    case milvus::FileOpenFailed:
+    case milvus::FileCreateFailed:
+    case milvus::FileReadFailed:
+    case milvus::FileWriteFailed:
+    case milvus::S3Error:
+    case milvus::FieldNotLoaded:
+    case milvus::MemAllocateFailed:
+    case milvus::MmapError:
+    case milvus::InsufficientResource:
+    case milvus::StorageTransientError:
+    case milvus::FollyOtherException:
+    case milvus::GcpNativeError:
+    // CollectionSchemaVersionNotReady is minted outside the common enum.
+    case 2046:
+      return true;
+    default:
+      return false;
+  }
+}
+
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info) {
   auto arrow_code =
       code == ExtendStatusCode::PackedInvalidArgs ? arrow::StatusCode::Invalid : arrow::StatusCode::IOError;
   return {arrow_code, std::move(message), std::make_shared<ExtendStatusDetail>(code, std::move(extra_info))};
+}
+
+arrow::Status ExtendStatusDetail::WrapFromSegcoreError(const milvus::SegcoreError& error) {
+  if (error.get_error_code() == milvus::Success) {
+    return arrow::Status::OK();
+  }
+  auto detail = std::make_shared<ExtendStatusDetail>(ExtendStatusCode::SegcoreError, error.what());
+  detail->segcore_error_ = error;
+  detail->retryable_ = DefaultRetryableForSegcoreErrorCode(static_cast<int>(error.get_error_code()));
+  return {arrow::StatusCode::Invalid, error.what(), std::move(detail)};
 }
 
 arrow::Status WrapExtendError(ExtendStatusCode code, std::string message, const arrow::Status& cause) {
@@ -195,6 +235,8 @@ milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
     case ExtendStatusCode::PackedArrowError:
     case ExtendStatusCode::PackedUnexpected:
       return milvus::StorageError;  // 2044, permanent internal storage error
+    case ExtendStatusCode::SegcoreError:
+      return milvus::StorageError;  // Wrapped errors retain their actual code in the detail.
     case ExtendStatusCode::AwsErrorNoSuchUpload:
       // The SDK has exhausted retries for the failed multipart upload state,
       // but an outer operation retry can create a fresh upload and succeed.
@@ -236,6 +278,11 @@ milvus::SegcoreError ToSegcoreError(const arrow::Status& status) {
 
   auto detail = ExtendStatusDetail::UnwrapStatus(status);
   if (detail) {
+    // direct return the origin segcore error if available
+    if (detail->segcore_error()) {
+      assert(detail->code() == ExtendStatusCode::SegcoreError);
+      return *detail->segcore_error();
+    }
     return {ToSegcoreErrorCode(detail->code()), status.ToString()};
   }
 

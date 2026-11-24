@@ -258,7 +258,8 @@ TEST_F(PaimonIntegrationTest, DeletionVectorReadsBypassDisabledMetadataCache) {
     EXPECT_EQ(ids, expected_ids);
     // Deletion positions must be reloaded per reader: the caller cache stays
     // empty, proving the disabled flag bypasses it instead of being ignored.
-    EXPECT_FALSE(cache.get<paimon::PaimonFormatReader>()->get(key).has_value());
+    ASSERT_AND_ASSIGN(const auto hit, cache.get<paimon::PaimonFormatReader>()->get(key));
+    EXPECT_EQ(hit, nullptr);
   }
 
   ASSERT_EQ(api::SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, "true"), std::nullopt);
@@ -266,7 +267,8 @@ TEST_F(PaimonIntegrationTest, DeletionVectorReadsBypassDisabledMetadataCache) {
                                             schema, column_group, {"id", "name"},
                                             std::make_shared<const api::Properties>(properties_), nullptr, "", cache));
   ASSERT_EQ(cached_reader->total_rows(), static_cast<int64_t>(expected_ids.size()));
-  EXPECT_TRUE(cache.get<paimon::PaimonFormatReader>()->get(key).has_value());
+  ASSERT_AND_ASSIGN(const auto hit, cache.get<paimon::PaimonFormatReader>()->get(key));
+  EXPECT_NE(hit, nullptr);
 }
 
 TEST_F(PaimonIntegrationTest, AutoUsesDirectFileForAppendVortex) {
@@ -396,9 +398,9 @@ TEST_F(PaimonIntegrationTest, ExplicitDataSplitReadsAppendTable) {
       api::ColumnGroupReader::create(schema, column_group, {"id"}, std::make_shared<const api::Properties>(properties_),
                                      nullptr, "", cache));
   EXPECT_EQ(column_group_reader->total_rows(), static_cast<int64_t>(kRows));
-  EXPECT_FALSE(cache.get<paimon::PaimonFormatReader>()
-                   ->get(paimon::PaimonFormatReader::MetaTrait::cache_key(files.front()))
-                   .has_value());
+  ASSERT_AND_ASSIGN(const auto cached, cache.get<paimon::PaimonFormatReader>()->get(
+                                           paimon::PaimonFormatReader::MetaTrait::cache_key(files.front())));
+  EXPECT_EQ(cached, nullptr);
 }
 
 TEST_F(PaimonIntegrationTest, ExplicitDataSplitAppliesDeletionVector) {

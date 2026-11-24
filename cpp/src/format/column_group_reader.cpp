@@ -236,7 +236,8 @@ arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupReaderImpl<ReaderT>::open_rea
   }
 
   auto file = column_group_->files[file_index];
-  if (!cache_.enabled()) {
+  const auto key = cache_.enabled() && !key_retriever_ ? ReaderT::MetaTrait::cache_key(file) : std::string{};
+  if (key.empty()) {
     ARROW_ASSIGN_OR_RAISE(auto reader, FormatReader::create(schema_, column_group_->format, file, properties_,
                                                             needed_columns_, key_retriever_));
     if (!predicate_.empty()) {
@@ -249,11 +250,13 @@ arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupReaderImpl<ReaderT>::open_rea
     }
     return typed_reader;
   } else {
-    auto key = ReaderT::MetaTrait::cache_key(file);
-    ARROW_ASSIGN_OR_RAISE(auto metadata, cache_.get<ReaderT>()->get_or_open(key, [this, file]() {
-      return FormatReader::load_metadata<ReaderT>(file, properties_, key_retriever_);
-    }));
-    return FormatReader::create_from_metadata<ReaderT>(metadata, file, schema_, needed_columns_, predicate_);
+    ARROW_ASSIGN_OR_RAISE(
+        auto metadata,
+        cache_.get<ReaderT>()->get_or_open(
+            key, [this, file]() { return FormatReader::load_metadata<ReaderT>(file, properties_, key_retriever_); },
+            file.Get<uint64_t>(api::kPropertyFooterSize)));
+    return FormatReader::create_from_metadata<ReaderT>(metadata, file, schema_, needed_columns_, predicate_,
+                                                       properties_);
   }
 
   return arrow::Status::Invalid("Unreachable code");
@@ -268,7 +271,8 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> ColumnGroupReaderImpl
   }
 
   auto file = column_group_->files[file_index];
-  if (!cache_.enabled()) {
+  const auto key = cache_.enabled() && !key_retriever_ ? ReaderT::MetaTrait::cache_key(file) : std::string{};
+  if (key.empty()) {
     // Without metadata caching, create and open a fresh stateful format reader.
     return FormatReader::create_async(schema_, column_group_->format, file, properties_, needed_columns_,
                                       key_retriever_)
@@ -292,19 +296,21 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> ColumnGroupReaderImpl
     // Share only immutable metadata across tasks, then apply projection and
     // predicate to a new stateful reader for this file operation.
     auto typed_cache = cache_.get<ReaderT>();
-    auto key = ReaderT::MetaTrait::cache_key(file);
     return typed_cache
-        ->get_or_open_async(key,
-                            [file, properties = properties_, key_retriever = key_retriever_]() {
-                              return ReaderT::MetaTrait::load_metadata_async(file, properties, key_retriever);
-                            })
-        .deferValue([file, read_schema = schema_, needed_columns = needed_columns_,
-                     predicate = predicate_](arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>&& metadata_result)
-                        -> folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> {
-          FOLLY_ARROW_ASSIGN_OR_RAISE(auto metadata, std::move(metadata_result));
-          return ReaderT::MetaTrait::create_from_metadata_async(std::move(metadata), file, read_schema, needed_columns,
-                                                                predicate);
-        });
+        ->get_or_open_async(
+            key,
+            [file, properties = properties_, key_retriever = key_retriever_]() {
+              return ReaderT::MetaTrait::load_metadata_async(file, properties, key_retriever);
+            },
+            file.Get<uint64_t>(api::kPropertyFooterSize))
+        .deferValue(
+            [file, read_schema = schema_, needed_columns = needed_columns_, predicate = predicate_,
+             properties = properties_](arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>&& metadata_result)
+                -> folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> {
+              FOLLY_ARROW_ASSIGN_OR_RAISE(auto metadata, std::move(metadata_result));
+              return ReaderT::MetaTrait::create_from_metadata_async(std::move(metadata), file, read_schema,
+                                                                    needed_columns, predicate, properties);
+            });
   }
 
   // Formats without a complete async metadata path keep the synchronous cache
@@ -835,10 +841,6 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
   auto create_reader = [&](const milvus_storage::MetadataCache& metadata_cache) {
     return metadata_cache.dispatch(
         column_group->format, [&](auto typed_cache) -> arrow::Result<std::unique_ptr<ColumnGroupReader>> {
-          if (!typed_cache) {
-            return arrow::Status::Invalid("Format reader metadata cache is null");
-          }
-
           using TypedCache = typename decltype(typed_cache)::element_type;
           using ReaderT = typename TypedCache::ReaderType;
           std::unique_ptr<ColumnGroupReader> reader = std::make_unique<ColumnGroupReaderImpl<ReaderT>>(
@@ -897,10 +899,6 @@ folly::SemiFuture<arrow::Result<std::unique_ptr<ColumnGroupReader>>> ColumnGroup
     return metadata_cache.dispatch(
         column_group->format,
         [&](auto typed_cache) -> folly::SemiFuture<arrow::Result<std::unique_ptr<ColumnGroupReader>>> {
-          if (!typed_cache) {
-            return folly::makeSemiFuture(ResultType(arrow::Status::Invalid("Format reader metadata cache is null")));
-          }
-
           using TypedCache = typename decltype(typed_cache)::element_type;
           using ReaderT = typename TypedCache::ReaderType;
           auto reader = std::make_unique<ColumnGroupReaderImpl<ReaderT>>(

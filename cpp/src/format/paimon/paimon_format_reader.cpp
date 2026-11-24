@@ -448,6 +448,7 @@ arrow::Result<PaimonFormatReader::MetaTrait::MetadataPtr> PaimonFormatReader::Me
   metadata->payload.read_path = parsed.read_path;
   metadata->payload.data_format = parsed.data_format;
   metadata->payload.record_count = parsed.record_count;
+  metadata->payload.properties = properties;
 
   if (parsed.read_path == kDirectFileReadPath) {
     size_t direct_cache_size = 0;
@@ -542,10 +543,12 @@ arrow::Result<std::shared_ptr<PaimonFormatReader>> PaimonFormatReader::MetaTrait
     const api::ColumnGroupFile& file,
     const std::shared_ptr<arrow::Schema>& read_schema,
     const std::vector<std::string>& needed_columns,
-    const std::string& /*predicate*/) {
+    const std::string& /*predicate*/,
+    const std::shared_ptr<const api::Properties>& properties) {
   if (!metadata) {
     return arrow::Status::Invalid("Cannot create Paimon reader from null metadata");
   }
+  const auto& reader_properties = properties ? properties : metadata->payload.properties;
   ARROW_ASSIGN_OR_RAISE(auto output_schema, ProjectSchema(metadata->file_schema, read_schema, needed_columns));
   if (metadata->payload.read_path == kDataSplitReadPath) {
     auto split_columns = needed_columns;
@@ -558,12 +561,22 @@ arrow::Result<std::shared_ptr<PaimonFormatReader>> PaimonFormatReader::MetaTrait
     if (!split_reader) {
       return arrow::Status::Invalid("Paimon data-split reader handle is unavailable in cached metadata");
     }
-    return std::shared_ptr<PaimonFormatReader>(
-        new PaimonFormatReader(std::move(metadata), file, read_schema, needed_columns, nullptr, std::move(split_reader),
-                               std::move(split_columns), std::move(output_schema)));
+    ARROW_ASSIGN_OR_RAISE(const auto chunk_rows,
+                          api::GetValue<uint64_t>(reader_properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+    ARROW_ASSIGN_OR_RAISE(const auto cached_chunk_rows,
+                          api::GetValue<uint64_t>(metadata->payload.properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+    auto reader = std::shared_ptr<PaimonFormatReader>(
+        new PaimonFormatReader(metadata, file, read_schema, needed_columns, nullptr, std::move(split_reader),
+                               std::move(split_columns), std::move(output_schema), reader_properties));
+    if (chunk_rows != cached_chunk_rows) {
+      ARROW_ASSIGN_OR_RAISE(auto groups, MakeLogicalRowGroups(metadata->payload.record_count, chunk_rows));
+      reader->row_group_infos_ = std::make_shared<const std::vector<RowGroupInfo>>(std::move(groups));
+    }
+    return reader;
   }
 
   std::shared_ptr<FormatReader> direct_file_reader;
+  bool rebuild_row_groups = false;
   if (metadata->payload.data_format == "parquet") {
     auto cached =
         std::get_if<parquet::ParquetFormatReader::MetaTrait::MetadataPtr>(&metadata->payload.direct_file_metadata);
@@ -571,8 +584,10 @@ arrow::Result<std::shared_ptr<PaimonFormatReader>> PaimonFormatReader::MetaTrait
       return arrow::Status::Invalid("Paimon cached metadata does not match data format parquet");
     }
     std::shared_ptr<parquet::ParquetFormatReader> parquet_reader;
-    ARROW_ASSIGN_OR_RAISE(parquet_reader, parquet::ParquetFormatReader::MetaTrait::create_from_metadata(
-                                              *cached, file, output_schema, needed_columns, ""));
+    ARROW_ASSIGN_OR_RAISE(parquet_reader,
+                          parquet::ParquetFormatReader::MetaTrait::create_from_metadata(
+                              parquet::ParquetFormatReader::MetaTrait::MetadataPtr(metadata, cached->get()), file,
+                              output_schema, needed_columns, "", reader_properties));
     direct_file_reader = std::static_pointer_cast<FormatReader>(std::move(parquet_reader));
   } else if (metadata->payload.data_format == "vortex") {
     auto cached =
@@ -581,15 +596,27 @@ arrow::Result<std::shared_ptr<PaimonFormatReader>> PaimonFormatReader::MetaTrait
       return arrow::Status::Invalid("Paimon cached metadata does not match data format vortex");
     }
     std::shared_ptr<vortex::VortexFormatReader> vortex_reader;
-    ARROW_ASSIGN_OR_RAISE(vortex_reader, vortex::VortexFormatReader::MetaTrait::create_from_metadata(
-                                             *cached, file, output_schema, needed_columns, ""));
+    ARROW_ASSIGN_OR_RAISE(vortex_reader,
+                          vortex::VortexFormatReader::MetaTrait::create_from_metadata(
+                              vortex::VortexFormatReader::MetaTrait::MetadataPtr(metadata, cached->get()), file,
+                              output_schema, needed_columns, "", reader_properties));
+    ARROW_ASSIGN_OR_RAISE(const auto chunk_rows,
+                          api::GetValue<uint64_t>(reader_properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+    rebuild_row_groups = chunk_rows != (*cached)->payload.logical_chunk_rows;
     direct_file_reader = std::static_pointer_cast<FormatReader>(std::move(vortex_reader));
   } else {
     return arrow::Status::NotImplemented("Paimon direct-file does not support format: ", metadata->payload.data_format);
   }
-  return std::shared_ptr<PaimonFormatReader>(
-      new PaimonFormatReader(std::move(metadata), file, read_schema, needed_columns, std::move(direct_file_reader),
-                             nullptr, std::vector<std::string>{}, std::move(output_schema)));
+  auto reader = std::shared_ptr<PaimonFormatReader>(
+      new PaimonFormatReader(metadata, file, read_schema, needed_columns, std::move(direct_file_reader), nullptr,
+                             std::vector<std::string>{}, std::move(output_schema), reader_properties));
+  if (rebuild_row_groups) {
+    ARROW_ASSIGN_OR_RAISE(auto physical, reader->direct_file_reader_->get_row_group_infos());
+    ARROW_ASSIGN_OR_RAISE(auto logical, MakeDirectLogicalRowGroups(physical, *metadata->payload.sorted_deletions));
+    reader->direct_physical_row_groups_ = std::make_shared<const std::vector<RowGroupInfo>>(std::move(physical));
+    reader->row_group_infos_ = std::make_shared<const std::vector<RowGroupInfo>>(std::move(logical));
+  }
+  return reader;
 }
 
 PaimonFormatReader::PaimonFormatReader(MetaTrait::MetadataPtr metadata,
@@ -599,8 +626,12 @@ PaimonFormatReader::PaimonFormatReader(MetaTrait::MetadataPtr metadata,
                                        std::shared_ptr<FormatReader> direct_file_reader,
                                        std::shared_ptr<BlockingPaimonDataSplitReader> split_reader,
                                        std::vector<std::string> split_columns,
-                                       std::shared_ptr<arrow::Schema> output_schema)
+                                       std::shared_ptr<arrow::Schema> output_schema,
+                                       std::shared_ptr<const api::Properties> properties)
     : metadata_(std::move(metadata)),
+      properties_(std::move(properties)),
+      row_group_infos_(metadata_, &metadata_->row_group_infos),
+      direct_physical_row_groups_(metadata_, &metadata_->payload.direct_physical_row_groups),
       file_(std::move(file)),
       read_schema_(std::move(read_schema)),
       needed_columns_(std::move(needed_columns)),
@@ -626,18 +657,17 @@ arrow::Result<std::unique_ptr<DataSplitStreamCursor>> PaimonFormatReader::make_d
   ARROW_ASSIGN_OR_RAISE(auto stream, split_reader_->OpenStream(split_columns_));
   ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&stream));
   return std::make_unique<DataSplitStreamCursor>(
-      internal::WrapPaimonRecordBatchReader(std::move(reader), output_schema_), metadata_->payload.record_count);
+      internal::WrapPaimonRecordBatchReader(std::move(reader), output_schema_, metadata_),
+      metadata_->payload.record_count);
 }
 
-arrow::Result<std::vector<RowGroupInfo>> PaimonFormatReader::get_row_group_infos() {
-  return metadata_->row_group_infos;
-}
+arrow::Result<std::vector<RowGroupInfo>> PaimonFormatReader::get_row_group_infos() { return *row_group_infos_; }
 
 arrow::Result<std::vector<uint64_t>> PaimonFormatReader::get_rg_column_memsz(int64_t row_group_index) const {
-  if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= metadata_->row_group_infos.size()) {
+  if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_->size()) {
     return arrow::Status::Invalid("Paimon row group index out of range: ", row_group_index);
   }
-  const auto& logical_group = metadata_->row_group_infos[row_group_index];
+  const auto& logical_group = (*row_group_infos_)[row_group_index];
   if (!logical_group.memory_size_available) {
     return arrow::Status::NotImplemented("Paimon column memory size statistics are not available");
   }
@@ -651,11 +681,11 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> PaimonFormatReader::filter_di
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> PaimonFormatReader::get_chunk(const int& row_group_index) {
-  if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= metadata_->row_group_infos.size()) {
+  if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_->size()) {
     return arrow::Status::Invalid("Paimon row group index out of range: ", row_group_index);
   }
   if (is_data_split()) {
-    const auto& group = metadata_->row_group_infos[row_group_index];
+    const auto& group = (*row_group_infos_)[row_group_index];
     if (!data_split_cursor_ || group.start_offset < data_split_cursor_->position()) {
       ARROW_ASSIGN_OR_RAISE(data_split_cursor_, make_data_split_cursor());
     }
@@ -670,11 +700,11 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> PaimonFormatReader::get_chunk
     }
     return batch;
   }
-  const auto& group = metadata_->row_group_infos[row_group_index];
+  const auto& group = (*row_group_infos_)[row_group_index];
   if (group.start_offset == group.end_offset) {
     return arrow::RecordBatch::MakeEmpty(output_schema_);
   }
-  const auto& physical = metadata_->payload.direct_physical_row_groups[row_group_index];
+  const auto& physical = (*direct_physical_row_groups_)[row_group_index];
   ARROW_ASSIGN_OR_RAISE(auto batch, direct_file_reader_->get_chunk(row_group_index));
   return filter_direct_batch(batch, physical.start_offset);
 }
@@ -689,14 +719,14 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> PaimonFormatRead
   if (is_data_split()) {
     int previous = -1;
     for (auto index : indices) {
-      if (index <= previous || index < 0 || static_cast<size_t>(index) >= metadata_->row_group_infos.size()) {
+      if (index <= previous || index < 0 || static_cast<size_t>(index) >= row_group_infos_->size()) {
         return arrow::Status::Invalid("Paimon get_chunks requires sorted unique row group indices");
       }
       previous = index;
     }
     ARROW_ASSIGN_OR_RAISE(auto cursor, make_data_split_cursor());
     for (auto index : indices) {
-      const auto& group = metadata_->row_group_infos[index];
+      const auto& group = (*row_group_infos_)[index];
       ARROW_ASSIGN_OR_RAISE(auto batches, cursor->ReadRange(group.start_offset, group.end_offset));
       ARROW_ASSIGN_OR_RAISE(auto batch, CombineBatches(batches, output_schema_));
       output.push_back(std::move(batch));
@@ -704,7 +734,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> PaimonFormatRead
     return output;
   }
   for (auto index : indices) {
-    if (index < 0 || static_cast<size_t>(index) >= metadata_->payload.direct_physical_row_groups.size()) {
+    if (index < 0 || static_cast<size_t>(index) >= direct_physical_row_groups_->size()) {
       return arrow::Status::Invalid("Paimon direct-file row group index out of range");
     }
   }
@@ -713,7 +743,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> PaimonFormatRead
     return arrow::Status::Invalid("Direct-file reader returned an unexpected Paimon chunk count");
   }
   for (size_t i = 0; i < batches.size(); ++i) {
-    const auto& physical = metadata_->payload.direct_physical_row_groups[indices[i]];
+    const auto& physical = (*direct_physical_row_groups_)[indices[i]];
     ARROW_ASSIGN_OR_RAISE(auto filtered, filter_direct_batch(batches[i], physical.start_offset));
     output.push_back(std::move(filtered));
   }
@@ -767,11 +797,12 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> PaimonFormatReader::rea
   }
   if (start == end) {
     ARROW_ASSIGN_OR_RAISE(auto empty, arrow::RecordBatch::MakeEmpty(output_schema_));
-    return arrow::RecordBatchReader::Make({empty});
+    ARROW_ASSIGN_OR_RAISE(auto reader, arrow::RecordBatchReader::Make({empty}));
+    return internal::WrapPaimonRecordBatchReader(std::move(reader), output_schema_, metadata_);
   }
   if (is_data_split()) {
     std::vector<std::pair<uint64_t, uint64_t>> ranges;
-    for (const auto& group : metadata_->row_group_infos) {
+    for (const auto& group : *row_group_infos_) {
       const auto group_start = static_cast<uint64_t>(group.start_offset);
       const auto group_end = static_cast<uint64_t>(group.end_offset);
       if (group_end <= start) {
@@ -797,8 +828,8 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> PaimonFormatReader::rea
 }
 
 arrow::Result<std::shared_ptr<FormatReader>> PaimonFormatReader::clone_reader() {
-  ARROW_ASSIGN_OR_RAISE(auto cloned,
-                        MetaTrait::create_from_metadata(metadata_, file_, read_schema_, needed_columns_, ""));
+  ARROW_ASSIGN_OR_RAISE(
+      auto cloned, MetaTrait::create_from_metadata(metadata_, file_, read_schema_, needed_columns_, "", properties_));
   ARROW_RETURN_NOT_OK(cloned->open());
   return std::static_pointer_cast<FormatReader>(cloned);
 }

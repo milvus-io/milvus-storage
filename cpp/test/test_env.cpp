@@ -33,9 +33,30 @@
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/arrow_util.h"
+#include "cachinglayer/Manager.h"
 
 namespace milvus_storage {
 using namespace milvus_storage::api;
+
+void InitMetadataCacheForTests() {
+  using namespace milvus::cachinglayer;
+  Manager::ConfigureTieredStorage({},
+                                  {kTestMetadataCacheBytes, kTestMetadataCacheBytes, kTestMetadataCacheBytes, 0, 0, 0},
+                                  false, true, {}, std::chrono::milliseconds(0));
+}
+
+arrow::Status EvictUnpinnedMetadataForTests() {
+  auto& manager = milvus::cachinglayer::Manager::GetInstance();
+  if (!manager.isEvictionEnabled()) {
+    return arrow::Status::OK();
+  }
+  const milvus::cachinglayer::ResourceUsage capacity{kTestMetadataCacheBytes, 0};
+  if (!manager.ReserveLoadingResourceWithTimeout(capacity, std::chrono::milliseconds(0))) {
+    return arrow::Status::Invalid("Cannot evict all metadata while handles are pinned");
+  }
+  manager.ReleaseLoadingResource(capacity);
+  return arrow::Status::OK();
+}
 
 bool IsCloudEnv() {
   auto storage_type = GetEnvVar(ENV_VAR_STORAGE_TYPE).ValueOr("");
@@ -48,6 +69,7 @@ bool IsTalonEnv() {
 }
 
 arrow::Status InitTestProperties(api::Properties& properties) {
+  InitMetadataCacheForTests();
   if (const auto crt_mode = GetEnvVar(ENV_VAR_S3_USE_CRT); crt_mode.ok()) {
     if (const auto error = api::SetValue(properties, PROPERTY_FS_S3_USE_CRT, crt_mode->c_str()); error) {
       return arrow::Status::Invalid(ENV_VAR_S3_USE_CRT, ": ", *error);

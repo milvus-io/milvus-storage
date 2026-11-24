@@ -88,6 +88,9 @@ arrow::Status MakeBridgeErrorStatus(std::string_view message) {
   if (ffi_err_code == LOON_NOT_SUPPORT) {
     return arrow::Status::NotImplemented(clean_message);
   }
+  if (ffi_err_code >= milvus::UnexpectedError && ffi_err_code <= milvus::KnowhereError) {
+    return ExtendStatusDetail::WrapFromSegcoreError({static_cast<milvus::ErrorCode>(ffi_err_code), clean_message});
+  }
   if (auto code = ExtendStatusCodeFromInt(ffi_err_code); code.has_value()) {
     return MakeExtendError(*code, clean_message, clean_message);
   }

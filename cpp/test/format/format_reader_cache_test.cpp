@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cerrno>
 #include <condition_variable>
 #include <chrono>
 #include <cstdlib>
@@ -34,8 +35,10 @@
 
 #include <arrow/api.h>
 #include <arrow/c/bridge.h>
+#include <arrow/util/io_util.h>
 
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format.h"
 #include "milvus-storage/format/format_reader_cache.h"
@@ -54,6 +57,7 @@
 #include "lance/lance_bridge.h"
 #include "paimon/paimon_bridge.h"
 #include "test_env.h"
+#include "cachinglayer/Manager.h"
 
 namespace milvus_storage::test {
 namespace {
@@ -240,7 +244,8 @@ arrow::Status RunThrowingLoaderNotifiesWaitersAndAllowsRetry(const std::shared_p
   if (waiter_result.ok()) {
     return arrow::Status::Invalid("waiter unexpectedly succeeded after throwing metadata loader");
   }
-  if (cache->get(key).has_value()) {
+  ARROW_ASSIGN_OR_RAISE(const auto failed_metadata, cache->get(key));
+  if (failed_metadata) {
     return arrow::Status::Invalid("throwing metadata loader poisoned cache entry");
   }
 
@@ -341,8 +346,8 @@ template <typename CacheT>
 arrow::Status RunAsyncDefersLookupAndLoaderUntilConsumed(const std::shared_ptr<CacheT>& cache) {
   using MetadataPtr = typename CacheT::MetadataPtr;
   const std::string key = "async-deferred-load";
-  auto loader_metadata = MakeMetadata<CacheT>(key + "-loader");
-  auto cached_metadata = MakeMetadata<CacheT>(key + "-cached");
+  auto loader_metadata = MakeMetadata<CacheT>(key);
+  auto cached_metadata = MakeMetadata<CacheT>(key);
   int loader_calls = 0;
 
   auto future = cache->get_or_open_async(key, [&]() -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
@@ -353,7 +358,7 @@ arrow::Status RunAsyncDefersLookupAndLoaderUntilConsumed(const std::shared_ptr<C
   if (loader_calls != 0) {
     return arrow::Status::Invalid("async metadata loader ran before future consumption");
   }
-  ARROW_RETURN_NOT_OK(cache->add(key, cached_metadata));
+  ARROW_RETURN_NOT_OK(cache->add(cached_metadata));
 
   auto result = std::move(future).get();
   if (!result.ok()) {
@@ -390,8 +395,10 @@ arrow::Status RunAsyncFutureKeepsCacheAliveUntilCompletion() {
     if (loaded_metadata.get() != metadata.get()) {
       return arrow::Status::Invalid("async metadata future returned unexpected metadata");
     }
+    EXPECT_FALSE(EvictUnpinnedMetadataForTests().ok());
   }
 
+  ARROW_RETURN_NOT_OK(EvictUnpinnedMetadataForTests());
   if (!weak_cache.expired()) {
     return arrow::Status::Invalid("async metadata future retained cache after completion");
   }
@@ -480,8 +487,8 @@ template <typename CacheT>
 arrow::Status RunAsyncLeaderDoesNotBlockSyncFollower(const std::shared_ptr<CacheT>& cache) {
   using MetadataPtr = typename CacheT::MetadataPtr;
   const std::string key = "async-leader-sync-waiter";
-  auto async_metadata = MakeMetadata<CacheT>(key + "-async");
-  auto sync_metadata = MakeMetadata<CacheT>(key + "-sync");
+  auto async_metadata = MakeMetadata<CacheT>(key);
+  auto sync_metadata = MakeMetadata<CacheT>(key);
   auto loader_promise = std::make_shared<folly::Promise<arrow::Result<MetadataPtr>>>();
   int async_loader_calls = 0;
   int sync_loader_calls = 0;
@@ -544,21 +551,25 @@ arrow::Status RunAsyncLeaderTimeoutNotifiesWaitersAndAllowsRetry(const std::shar
   std::optional<folly::Future<MetadataResult>> follower;
   int loader_calls = 0;
 
-  auto leader = cache->get_or_open_async(key, [&]() -> folly::SemiFuture<MetadataResult> {
-    ++loader_calls;
-    // Subscribe while the leader is loading, before its timed wait detaches.
-    follower.emplace(std::move(cache->get_or_open_async(key, [&]() -> folly::SemiFuture<MetadataResult> {
-                       ++loader_calls;
-                       return folly::makeSemiFuture(MetadataResult(arrow::Status::Invalid("follower ran loader")));
-                     })).toUnsafeFuture());
-    return loader_promise.getSemiFuture();
-  });
+  auto leader = cache->get_or_open_async(
+      key,
+      [&]() -> folly::SemiFuture<MetadataResult> {
+        ++loader_calls;
+        // Subscribe while the leader is loading, before its timed wait detaches.
+        follower.emplace(std::move(cache->get_or_open_async(key, [&]() -> folly::SemiFuture<MetadataResult> {
+                           ++loader_calls;
+                           return folly::makeSemiFuture(MetadataResult(arrow::Status::Invalid("follower ran loader")));
+                         })).toUnsafeFuture());
+        return loader_promise.getSemiFuture();
+      },
+      kTestMetadataCacheBytes);
   try {
     (void)std::move(leader).get(std::chrono::milliseconds(5));
     return arrow::Status::Invalid("pending metadata leader unexpectedly completed before timeout");
   } catch (const folly::FutureTimeout&) {
   }
 
+  EXPECT_FALSE(EvictUnpinnedMetadataForTests().ok());
   // Resolving the loader after timeout destroys the abandoned continuation.
   // Its singleflight must be completed even though the leader no longer waits.
   loader_promise.setValue(MetadataResult(metadata));
@@ -571,9 +582,11 @@ arrow::Status RunAsyncLeaderTimeoutNotifiesWaitersAndAllowsRetry(const std::shar
   } catch (const folly::FutureTimeout&) {
     return arrow::Status::Invalid("abandoned metadata leader stranded its follower");
   }
-  if (cache->get(key).has_value()) {
+  ARROW_ASSIGN_OR_RAISE(const auto failed_metadata, cache->get(key));
+  if (failed_metadata) {
     return arrow::Status::Invalid("abandoned metadata leader populated cache");
   }
+  ARROW_RETURN_NOT_OK(EvictUnpinnedMetadataForTests());
 
   ARROW_ASSIGN_OR_RAISE(auto retried,
                         std::move(cache->get_or_open_async(key, [&]() -> folly::SemiFuture<MetadataResult> {
@@ -588,7 +601,104 @@ arrow::Status RunAsyncLeaderTimeoutNotifiesWaitersAndAllowsRetry(const std::shar
 
 }  // namespace
 
-class FormatReaderMetadataCacheParamTest : public ::testing::TestWithParam<std::string> {};
+class FormatReaderMetadataCacheParamTest : public ::testing::TestWithParam<std::string> {
+  protected:
+  void SetUp() override { InitMetadataCacheForTests(); }
+};
+
+TEST(FormatReaderMetadataCacheInitializationTest, DisabledCacheReadsWithoutCommon) {
+  if (milvus::cachinglayer::Manager::GetInstance().isEvictionEnabled()) {
+    GTEST_SKIP() << "Run this test with the uninitialized Manager";
+  }
+  ASSERT_AND_ASSIGN(auto dir, arrow::internal::TemporaryDir::Make("metadata-cache-off-"));
+  api::Properties properties;
+  ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_STORAGE_TYPE, "local"), std::nullopt);
+  ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_ROOT_PATH, dir->path().ToString().c_str()), std::nullopt);
+  ASSERT_EQ(api::SetValue(properties, PROPERTY_READER_METADATA_CACHE_ENABLE, "false"), std::nullopt);
+  const auto props = std::make_shared<const api::Properties>(std::move(properties));
+  ASSERT_AND_ASSIGN(auto schema, CreateTestSchema());
+  ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema));
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema));
+  auto writer = api::Writer::create("cache-off", schema, std::move(policy), props);
+  ASSERT_STATUS_OK(writer->write(batch));
+  ASSERT_AND_ASSIGN(auto groups, writer->close());
+  auto reader = api::Reader::create(groups, schema, nullptr, props);
+  ASSERT_NE(reader, nullptr);
+
+  ASSERT_AND_ASSIGN(auto stream, reader->get_record_batch_reader());
+  ASSERT_AND_ASSIGN(auto table, stream->ToTable());
+  EXPECT_EQ(table->num_rows(), batch->num_rows());
+  ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader_async(0).get());
+  ASSERT_AND_ASSIGN(auto chunk, chunk_reader->get_chunk(0));
+  EXPECT_TRUE(chunk->Equals(*batch));
+  ASSERT_AND_ASSIGN(auto taken, reader->take_async({0}).get());
+  ASSERT_AND_ASSIGN(auto taken_batch, taken->CombineChunksToBatch());
+  EXPECT_TRUE(taken_batch->Equals(*batch->Slice(0, 1)));
+}
+
+TEST(FormatReaderMetadataCacheInitializationTest, MissingInitializationReturnsErrorsAndAllowsRetry) {
+  if (milvus::cachinglayer::Manager::GetInstance().isEvictionEnabled()) {
+    GTEST_SKIP() << "Run this test alone to exercise the uninitialized Manager";
+  }
+  api::Properties properties;
+  ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_STORAGE_TYPE, "local"), std::nullopt);
+  ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_ROOT_PATH, "/tmp"), std::nullopt);
+  auto group = std::make_shared<api::ColumnGroup>();
+  group->format = LOON_FORMAT_PARQUET;
+  group->columns = {"id"};
+  group->files.push_back(api::ColumnGroupFile{"metadata-cache-must-not-open.parquet", 0, 1, {}});
+  auto groups = std::make_shared<api::ColumnGroups>();
+  groups->push_back(group);
+  auto reader = api::Reader::create(groups, arrow::schema({arrow::field("id", arrow::int64())}), nullptr,
+                                    std::make_shared<const api::Properties>(properties));
+  ASSERT_NE(reader, nullptr);
+  const auto sync_result = reader->get_chunk_reader(0);
+  EXPECT_TRUE(sync_result.status().IsInvalid()) << sync_result.status().ToString();
+  EXPECT_NE(sync_result.status().message().find("initialized eviction-enabled"), std::string::npos);
+  EXPECT_EQ(ToSegcoreError(sync_result.status()).get_error_code(), milvus::ErrorCode::InvalidParameter);
+  const auto async_result = reader->get_chunk_reader_async(0).get();
+  EXPECT_TRUE(async_result.status().IsInvalid()) << async_result.status().ToString();
+  EXPECT_NE(async_result.status().message().find("initialized eviction-enabled"), std::string::npos);
+  EXPECT_EQ(ToSegcoreError(async_result.status()).get_error_code(), milvus::ErrorCode::InvalidParameter);
+
+  InitMetadataCacheForTests();
+  ASSERT_STATUS_OK(MetadataCache().dispatch(LOON_FORMAT_PARQUET, [](const auto& cache) -> arrow::Status {
+    using CacheT = std::decay_t<decltype(*cache)>;
+    int loads = 0;
+    auto loader = [&]() -> typename CacheT::MetadataResult {
+      ++loads;
+      return MakeMetadata<CacheT>("after-initialization");
+    };
+    ARROW_ASSIGN_OR_RAISE(auto first, cache->get_or_open("after-initialization", loader));
+    ARROW_ASSIGN_OR_RAISE(auto second, cache->get_or_open("after-initialization", loader));
+    EXPECT_EQ(loads, 1);
+    EXPECT_EQ(first.get(), second.get());
+    return arrow::Status::OK();
+  }));
+}
+
+TEST(FormatReaderMetadataCacheDisabledManagerTest, DisabledEvictionReturnsErrorWithoutLoading) {
+  using milvus::cachinglayer::Manager;
+  if (Manager::GetInstance().isEvictionEnabled()) {
+    GTEST_SKIP() << "Run this test separately with eviction disabled";
+  }
+  Manager::ConfigureTieredStorage({}, {}, false, false, {}, std::chrono::milliseconds(0));
+  int loads = 0;
+  const auto status = MetadataCache().dispatch(LOON_FORMAT_PARQUET, [&](const auto& cache) -> arrow::Status {
+    using CacheT = std::decay_t<decltype(*cache)>;
+    return cache
+        ->get_or_open("disabled-eviction",
+                      [&]() -> typename CacheT::MetadataResult {
+                        ++loads;
+                        return MakeMetadata<CacheT>("disabled-eviction");
+                      })
+        .status();
+  });
+  EXPECT_TRUE(status.IsInvalid()) << status.ToString();
+  EXPECT_NE(status.message().find("initialized eviction-enabled"), std::string::npos);
+  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::ErrorCode::InvalidParameter);
+  EXPECT_EQ(loads, 0);
+}
 
 class FormatReaderMetadataCacheIOTest : public ::testing::TestWithParam<std::string> {
   protected:
@@ -915,6 +1025,11 @@ TEST_P(FormatReaderMetadataCacheParamTest, TypedCachesAreStableAndSharedAcrossCo
       EXPECT_EQ(copy.enabled(), enabled);
       const auto original_cache = original.get<ReaderT>();
       const auto copied_cache = copy.get<ReaderT>();
+      if (!enabled) {
+        EXPECT_EQ(original_cache, nullptr);
+        EXPECT_EQ(copied_cache, nullptr);
+        continue;
+      }
       if (!original_cache || !copied_cache) {
         return arrow::Status::Invalid("metadata cache or its copy returned null typed cache");
       }
@@ -923,14 +1038,15 @@ TEST_P(FormatReaderMetadataCacheParamTest, TypedCachesAreStableAndSharedAcrossCo
           original.dispatch(GetParam(), [](const auto& cache) -> arrow::Result<const void*> { return cache.get(); }));
       EXPECT_EQ(dispatched, original_cache.get());
       EXPECT_EQ(original_cache.get(), copied_cache.get());
+      EXPECT_EQ(original_cache.get(), MetadataCache().get<ReaderT>().get());
 
       const std::string key = "shared-cache-copy";
       const auto metadata = MakeMetadata<CacheT>(key);
-      ARROW_RETURN_NOT_OK(original_cache->add(key, metadata));
-      const auto cached = copied_cache->get(key);
-      EXPECT_TRUE(cached.has_value());
+      ARROW_RETURN_NOT_OK(original_cache->add(metadata));
+      ARROW_ASSIGN_OR_RAISE(const auto cached, copied_cache->get(key));
+      EXPECT_NE(cached, nullptr);
       if (cached) {
-        EXPECT_EQ(cached->get(), metadata.get());
+        EXPECT_EQ(cached.get(), metadata.get());
       }
     }
     return arrow::Status::OK();
@@ -941,23 +1057,40 @@ TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenCachesLoaderResult) {
   ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
     using CacheT = std::decay_t<decltype(*cache)>;
     const std::string key = "metadata-cache-hit";
-    auto metadata = MakeMetadata<CacheT>(key);
+    auto metadata = std::make_shared<typename CacheT::Trait::Metadata>(*MakeMetadata<CacheT>(key));
+    metadata->cache_size = kTestMetadataCacheBytes;
     int loader_calls = 0;
 
-    ARROW_ASSIGN_OR_RAISE(auto first_metadata,
-                          cache->get_or_open(key, [&]() -> arrow::Result<typename CacheT::MetadataPtr> {
-                            ++loader_calls;
-                            return metadata;
-                          }));
-    ARROW_ASSIGN_OR_RAISE(auto second_metadata,
-                          cache->get_or_open(key, [&]() -> arrow::Result<typename CacheT::MetadataPtr> {
-                            ++loader_calls;
-                            return MakeMetadata<CacheT>("unexpected");
-                          }));
+    // The admission delta must fit even when the estimate and charged size differ.
+    ARROW_ASSIGN_OR_RAISE(auto first_metadata, cache->get_or_open(
+                                                   key,
+                                                   [&]() -> arrow::Result<typename CacheT::MetadataPtr> {
+                                                     ++loader_calls;
+                                                     EXPECT_FALSE(EvictUnpinnedMetadataForTests().ok());
+                                                     return typename CacheT::MetadataPtr(metadata);
+                                                   },
+                                                   1));
+    ARROW_ASSIGN_OR_RAISE(auto second_metadata, cache->get_or_open(
+                                                    key,
+                                                    [&]() -> arrow::Result<typename CacheT::MetadataPtr> {
+                                                      ++loader_calls;
+                                                      return MakeMetadata<CacheT>("unexpected");
+                                                    },
+                                                    kTestMetadataCacheBytes + 1));
 
     EXPECT_EQ(loader_calls, 1);
     EXPECT_EQ(first_metadata.get(), metadata.get());
     EXPECT_EQ(second_metadata.get(), metadata.get());
+    EXPECT_FALSE(EvictUnpinnedMetadataForTests().ok());
+    auto copied = second_metadata;
+    auto moved = std::move(copied);
+    first_metadata.reset();
+    second_metadata.reset();
+    EXPECT_FALSE(EvictUnpinnedMetadataForTests().ok());
+    moved.reset();
+    ARROW_RETURN_NOT_OK(EvictUnpinnedMetadataForTests());
+    ARROW_ASSIGN_OR_RAISE(const auto absent, cache->get(key));
+    EXPECT_EQ(absent, nullptr);
     return arrow::Status::OK();
   }));
 }
@@ -968,33 +1101,44 @@ TEST_P(FormatReaderMetadataCacheParamTest, AddRejectsNullMetadataAndLeavesKeyAbs
     const std::string key = "null-add";
     typename CacheT::MetadataPtr null_metadata;
 
-    auto status = cache->add(key, null_metadata);
+    auto status = cache->add(null_metadata);
 
     EXPECT_TRUE(status.IsInvalid()) << status.ToString();
-    EXPECT_FALSE(cache->get(key).has_value());
+    ARROW_ASSIGN_OR_RAISE(const auto absent, cache->get(key));
+    EXPECT_EQ(absent, nullptr);
+    auto oversized = std::make_shared<typename CacheT::Trait::Metadata>(*MakeMetadata<CacheT>(key));
+    oversized->cache_size = kTestMetadataCacheBytes + 1;
+    const auto rejected = cache->add(oversized);
+    EXPECT_EQ(ToSegcoreError(rejected).get_error_code(), milvus::InsufficientResource);
+    ARROW_ASSIGN_OR_RAISE(const auto retried, cache->get_or_open(key, [&]() { return MakeMetadata<CacheT>(key); }));
+    EXPECT_EQ(retried->cache_key, key);
     return arrow::Status::OK();
   }));
 }
 
 TEST_P(FormatReaderMetadataCacheParamTest, FailedLoadsDoNotPoisonCacheAndAllowRetry) {
-  enum class Failure { kStatus, kNullMetadata, kThrownException, kExceptionalFuture };
+  enum class Failure { kStatus, kNullMetadata, kThrownException, kExceptionalFuture, kReservationDenied };
   ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
     using CacheT = std::decay_t<decltype(*cache)>;
     using MetadataResult = typename CacheT::MetadataResult;
+    const auto original_failure = arrow::Status::IOError("original metadata loader failure")
+                                      .WithDetail(arrow::internal::StatusDetailFromErrno(EACCES));
     for (const bool asynchronous : {false, true}) {
-      for (const auto failure :
-           {Failure::kStatus, Failure::kNullMetadata, Failure::kThrownException, Failure::kExceptionalFuture}) {
+      for (const auto failure : {Failure::kStatus, Failure::kNullMetadata, Failure::kThrownException,
+                                 Failure::kExceptionalFuture, Failure::kReservationDenied}) {
         if (!asynchronous && failure == Failure::kExceptionalFuture) {
           continue;
         }
         SCOPED_TRACE(::testing::Message() << "async=" << asynchronous << ", failure=" << static_cast<int>(failure));
         const auto key = std::to_string(asynchronous) + "-failure-" + std::to_string(static_cast<int>(failure));
         const auto metadata = MakeMetadata<CacheT>(key);
+        const bool denied = failure == Failure::kReservationDenied;
+        const auto estimated_bytes = kTestMetadataCacheBytes + (denied ? 1 : 0);
         int loader_calls = 0;
         auto fail = [&]() -> MetadataResult {
           ++loader_calls;
           if (failure == Failure::kStatus) {
-            return arrow::Status::Invalid("original metadata loader failure");
+            return original_failure;
           }
           if (failure == Failure::kNullMetadata) {
             return typename CacheT::MetadataPtr{};
@@ -1003,29 +1147,39 @@ TEST_P(FormatReaderMetadataCacheParamTest, FailedLoadsDoNotPoisonCacheAndAllowRe
         };
         const auto failed = [&]() -> MetadataResult {
           if (!asynchronous) {
-            return cache->get_or_open(key, fail);
+            return cache->get_or_open(key, fail, estimated_bytes);
           }
-          return std::move(cache->get_or_open_async(key,
-                                                    [&]() -> folly::SemiFuture<MetadataResult> {
-                                                      if (failure == Failure::kExceptionalFuture) {
-                                                        ++loader_calls;
-                                                        return folly::makeSemiFuture<MetadataResult>(
-                                                            folly::make_exception_wrapper<std::runtime_error>(
-                                                                "original metadata loader failure"));
-                                                      }
-                                                      return folly::makeSemiFuture(fail());
-                                                    }))
+          return std::move(
+                     cache->get_or_open_async(
+                         key,
+                         [&]() -> folly::SemiFuture<MetadataResult> {
+                           if (failure == Failure::kExceptionalFuture) {
+                             ++loader_calls;
+                             return folly::makeSemiFuture<MetadataResult>(
+                                 folly::make_exception_wrapper<std::runtime_error>("original metadata loader failure"));
+                           }
+                           return folly::makeSemiFuture(fail());
+                         },
+                         estimated_bytes))
               .get();
         }();
-        if (failure == Failure::kStatus || failure == Failure::kNullMetadata) {
+        if (denied) {
+          EXPECT_EQ(ToSegcoreError(failed.status()).get_error_code(), milvus::InsufficientResource);
+        } else if (failure == Failure::kStatus) {
+          EXPECT_TRUE(failed.status().IsIOError());
+          EXPECT_EQ(failed.status().detail(), original_failure.detail());
+        } else if (failure == Failure::kNullMetadata) {
           EXPECT_TRUE(failed.status().IsInvalid()) << failed.status().ToString();
         } else {
           EXPECT_TRUE(failed.status().IsUnknownError()) << failed.status().ToString();
         }
-        if (failure != Failure::kNullMetadata) {
+        if (!denied && failure != Failure::kNullMetadata) {
           EXPECT_NE(failed.status().message().find("original metadata loader failure"), std::string::npos);
         }
-        EXPECT_FALSE(cache->get(key).has_value());
+        EXPECT_EQ(loader_calls, denied ? 0 : 1);
+        ARROW_RETURN_NOT_OK(EvictUnpinnedMetadataForTests());
+        ARROW_ASSIGN_OR_RAISE(const auto absent, cache->get(key));
+        EXPECT_EQ(absent, nullptr);
         auto retry = [&]() -> MetadataResult {
           ++loader_calls;
           return metadata;
@@ -1035,12 +1189,12 @@ TEST_P(FormatReaderMetadataCacheParamTest, FailedLoadsDoNotPoisonCacheAndAllowRe
             asynchronous
                 ? std::move(cache->get_or_open_async(key, [&]() { return folly::makeSemiFuture(retry()); })).get()
                 : cache->get_or_open(key, retry));
-        EXPECT_EQ(loader_calls, 2);
+        EXPECT_EQ(loader_calls, denied ? 1 : 2);
         EXPECT_EQ(retried.get(), metadata.get());
-        const auto cached = cache->get(key);
-        EXPECT_TRUE(cached.has_value());
+        ARROW_ASSIGN_OR_RAISE(const auto cached, cache->get(key));
+        EXPECT_NE(cached, nullptr);
         if (cached) {
-          EXPECT_EQ(cached->get(), metadata.get());
+          EXPECT_EQ(cached.get(), metadata.get());
         }
       }
     }
@@ -1112,7 +1266,8 @@ TEST_P(FormatReaderMetadataCacheParamTest, InvalidAsyncFuturePreservesErrorForWa
     }
     const auto follower_result = std::move(*follower).get(std::chrono::seconds(1));
     EXPECT_EQ(follower_result.status().ToString(), leader_result.status().ToString());
-    EXPECT_FALSE(cache->get(key).has_value());
+    ARROW_ASSIGN_OR_RAISE(const auto absent, cache->get(key));
+    EXPECT_EQ(absent, nullptr);
 
     ARROW_ASSIGN_OR_RAISE(auto retried, std::move(cache->get_or_open_async(key, [&]() {
                                           return folly::makeSemiFuture(MetadataResult(metadata));
@@ -1250,7 +1405,9 @@ TEST_P(FormatReaderMetadataCacheIOTest, ProjectedReadersLoadEachFileFooterOnce) 
   EXPECT_GT(metrics->GetReadBytes(), 0);
   first.reset();
 
-  // Reopening the same column on this Reader must also reuse its footer cache.
+  // A separate top-level Reader reuses metadata retained by the shared KV.
+  reader.reset();
+  reader = api::Reader::create(column_groups, schema_, nullptr, std::make_shared<const api::Properties>(properties_));
   metrics->Reset();
   ASSERT_AND_ASSIGN(auto cached_first, reader->get_chunk_reader(0, first_columns));
   EXPECT_EQ(metrics->GetReadCount(), 0);
@@ -1269,6 +1426,30 @@ TEST_P(FormatReaderMetadataCacheIOTest, ProjectedReadersLoadEachFileFooterOnce) 
   EXPECT_EQ(std::accumulate(chunk_rows.begin(), chunk_rows.end(), uint64_t{0}), expected_rows);
   ASSERT_STATUS_OK(ReadProjectedChunks(reader.get(), *first_columns, expected_rows, 1));
   ASSERT_STATUS_OK(ReadProjectedChunks(reader.get(), *remaining_columns, expected_rows, 1));
+  remaining.reset();
+  reader.reset();
+  const auto& file = column_groups->front()->files.front();
+  const auto projection = arrow::schema({schema_->field(0)});
+  ASSERT_STATUS_OK(MetadataCache().dispatch(format, [&](const auto& cache) -> arrow::Status {
+    using ReaderT = typename std::decay_t<decltype(cache)>::element_type::ReaderType;
+    using Trait = typename ReaderT::MetaTrait;
+    const auto properties = std::make_shared<const api::Properties>(properties_);
+    ARROW_ASSIGN_OR_RAISE(auto metadata, cache->get_or_open(Trait::cache_key(file), [&]() {
+      return Trait::load_metadata(file, properties, nullptr);
+    }));
+    ARROW_ASSIGN_OR_RAISE(auto format_reader,
+                          Trait::create_from_metadata(metadata, file, projection, *first_columns, ""));
+    metadata.reset();
+    ARROW_ASSIGN_OR_RAISE(auto clone, format_reader->clone_reader());
+    format_reader.reset();
+    ARROW_ASSIGN_OR_RAISE(auto stream, clone->read_with_range(0, 1));
+    clone.reset();
+    EXPECT_FALSE(EvictUnpinnedMetadataForTests().ok());
+    ARROW_ASSIGN_OR_RAISE(auto table, stream->ToTable());
+    EXPECT_EQ(table->num_rows(), 1);
+    stream.reset();
+    return EvictUnpinnedMetadataForTests();
+  }));
 }
 
 INSTANTIATE_TEST_SUITE_P(Formats,

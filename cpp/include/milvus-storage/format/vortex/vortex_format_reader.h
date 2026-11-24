@@ -70,13 +70,15 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
         const api::ColumnGroupFile& file,
         const std::shared_ptr<arrow::Schema>& read_schema,
         const std::vector<std::string>& needed_columns,
-        const std::string& predicate);
+        const std::string& predicate,
+        const std::shared_ptr<const api::Properties>& properties = nullptr);
     static folly::SemiFuture<arrow::Result<std::shared_ptr<VortexFormatReader>>> create_from_metadata_async(
         MetadataPtr metadata,
         const api::ColumnGroupFile& file,
         const std::shared_ptr<arrow::Schema>& read_schema,
         const std::vector<std::string>& needed_columns,
-        const std::string& predicate);
+        const std::string& predicate,
+        const std::shared_ptr<const api::Properties>& properties = nullptr);
 
  private:
     // Implementation detail, not part of FormatReaderWithMetadata. This helper
@@ -166,13 +168,18 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
                      uint64_t file_size,
                      uint64_t footer_size,
                      const std::shared_ptr<arrow::Schema>& read_schema,
-                     const std::vector<std::string>& needed_columns);
+                     const std::vector<std::string>& needed_columns,
+                     const std::shared_ptr<const api::Properties>& properties);
+
+  [[nodiscard]] arrow::Result<ArrowArrayStream> retain_metadata_stream(ArrowArrayStream stream) const;
 
   [[nodiscard]] arrow::Result<ArrowArrayStream> read(uint64_t row_start,
                                                      uint64_t row_end,
                                                      const ffi::CoalescingWindow& coalescing_window);
 
   private:
+  // Keep the cache Pin alive until all native reader members are released.
+  MetaTrait::MetadataPtr metadata_;
   std::shared_ptr<FileSystemWrapper> fs_holder_;
   std::vector<std::string> proj_cols_;
   std::string path_;

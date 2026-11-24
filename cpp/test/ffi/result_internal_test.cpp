@@ -161,6 +161,76 @@ TEST(FFIInternalResultTest, MapsPlainPathNotFoundToFileNotFound) {
   EXPECT_EQ(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR), LOON_FILE_NOT_FOUND);
 }
 
+TEST(FFIInternalResultTest, ExternalErrorCodesSurviveArrowErrorMacros) {
+  for (const auto code :
+       {milvus::MemAllocateFailed, milvus::InsufficientResource, milvus::InvalidParameter, milvus::OutOfRange,
+        milvus::FollyCancel, milvus::StorageTransientError, static_cast<milvus::ErrorCode>(2999)}) {
+    SCOPED_TRACE(static_cast<int>(code));
+    const milvus::SegcoreError original(code, "original external failure");
+    const auto status = ExtendStatusDetail::WrapFromSegcoreError(original);
+    EXPECT_EQ(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR), static_cast<int>(code));
+    for (const auto return_error : {ReturnArrowError, ReturnArrowErrorIf}) {
+      auto result = return_error(status, LOON_ARROW_ERROR);
+      EXPECT_EQ(result.err_code, static_cast<int>(code));
+      ASSERT_NE(result.message, nullptr);
+      EXPECT_NE(std::string(result.message).find(original.what()), std::string::npos);
+      loon_ffi_free_result(&result);
+    }
+  }
+  auto success =
+      ReturnArrowErrorIf(ExtendStatusDetail::WrapFromSegcoreError(milvus::SegcoreError::success()), LOON_ARROW_ERROR);
+  EXPECT_EQ(success.err_code, LOON_SUCCESS);
+  EXPECT_EQ(success.message, nullptr);
+}
+
+TEST(FFIInternalResultTest, ExternalErrorRetryabilityMatchesSegcorePolicy) {
+  for (const auto code : {milvus::FileOpenFailed, milvus::FileCreateFailed, milvus::FileReadFailed,
+                          milvus::FileWriteFailed, milvus::S3Error, milvus::FieldNotLoaded, milvus::MemAllocateFailed,
+                          milvus::MmapError, milvus::InsufficientResource, milvus::StorageTransientError,
+                          milvus::FollyOtherException, milvus::GcpNativeError}) {
+    EXPECT_TRUE(loon_ffi_is_retryable_errcode(static_cast<int>(code))) << static_cast<int>(code);
+    const auto detail = ExtendStatusDetail::UnwrapStatus(ExtendStatusDetail::WrapFromSegcoreError({code, "retry"}));
+    ASSERT_NE(detail, nullptr);
+    EXPECT_TRUE(detail->retryable()) << static_cast<int>(code);
+  }
+  for (const auto code : {milvus::InvalidParameter, milvus::FollyCancel, milvus::OutOfRange, milvus::StorageError,
+                          milvus::ObjectNotExist, milvus::KnowhereError, static_cast<milvus::ErrorCode>(2999)}) {
+    EXPECT_FALSE(loon_ffi_is_retryable_errcode(static_cast<int>(code))) << static_cast<int>(code);
+    const auto detail = ExtendStatusDetail::UnwrapStatus(ExtendStatusDetail::WrapFromSegcoreError({code, "permanent"}));
+    ASSERT_NE(detail, nullptr);
+    EXPECT_FALSE(detail->retryable()) << static_cast<int>(code);
+  }
+  EXPECT_FALSE(loon_ffi_is_retryable_errcode(LOON_SUCCESS));
+  EXPECT_TRUE(loon_ffi_is_retryable_errcode(2046));  // CollectionSchemaVersionNotReady.
+  EXPECT_TRUE(loon_ffi_is_retryable_errcode(LOON_TRANSIENT_NETWORK));
+  EXPECT_FALSE(loon_ffi_is_retryable_errcode(LOON_AWS_ERROR_ACCESS_DENIED));
+}
+
+TEST(FFIInternalResultTest, RestoresExternalStatusFromFFIErrorMessage) {
+  for (const auto code : {milvus::UnexpectedError, milvus::MemAllocateFailed, milvus::InsufficientResource,
+                          milvus::InvalidParameter, milvus::FollyCancel, milvus::KnowhereError}) {
+    SCOPED_TRACE(static_cast<int>(code));
+    const milvus::SegcoreError original(code, "original external error");
+    const auto ffi_code = FFIErrorCodeFromExtendStatus(ExtendStatusDetail::WrapFromSegcoreError(original));
+    const auto message = std::string(kFFIErrorCodeMarker) + std::to_string(ffi_code) + "; " + original.what();
+    const auto restored = MakeBridgeErrorStatus(message);
+    ASSERT_NE(ExtendStatusDetail::UnwrapStatus(restored), nullptr);
+    const auto restored_error = ToSegcoreError(restored);
+    EXPECT_EQ(restored_error.get_error_code(), original.get_error_code());
+    EXPECT_STREQ(restored_error.what(), original.what());
+    EXPECT_EQ(restored.message(), original.what());
+    EXPECT_EQ(restored.message().find(kFFIErrorCodeMarker), std::string::npos);
+
+    const auto contextual = MakeBridgeErrorStatus("read metadata", message);
+    EXPECT_EQ(contextual.message(), "read metadata: original external error");
+    EXPECT_EQ(ToSegcoreError(contextual).get_error_code(), original.get_error_code());
+  }
+  const auto unknown = MakeBridgeErrorStatus("__LOON_FFI_ERRCODE__=2999; unknown external error");
+  EXPECT_TRUE(unknown.IsIOError());
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(unknown), nullptr);
+  EXPECT_EQ(unknown.message(), "unknown external error");
+}
+
 TEST(FFIInternalResultTest, RoundTripsGenericPermissionStatus) {
   int permission_code = LOON_ARROW_ERROR;
   for (int error_number : {EACCES, EPERM}) {

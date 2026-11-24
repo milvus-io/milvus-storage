@@ -29,7 +29,8 @@
 namespace milvus_storage::lance {
 
 namespace internal {
-std::shared_ptr<arrow::RecordBatchReader> WrapLanceRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner);
+std::shared_ptr<arrow::RecordBatchReader> WrapLanceRecordBatchReader(
+    std::shared_ptr<arrow::RecordBatchReader> inner, std::shared_ptr<const void> metadata_owner = nullptr);
 }  // namespace internal
 
 /// Replace the global Lance tokio runtime with a new one using the specified number of worker threads.

@@ -83,6 +83,9 @@ inline std::optional<milvus_storage::ExtendStatusCode> ExtendStatusCodeFromFFIEr
 inline int FFIErrorCodeFromExtendStatus(const arrow::Status& status, int fallback = LOON_ARROW_ERROR) {
   auto detail = milvus_storage::ExtendStatusDetail::UnwrapStatus(status);
   if (detail) {
+    if (detail->segcore_error()) {
+      return static_cast<int>(detail->segcore_error()->get_error_code());
+    }
     return milvus_storage::ffi_internal::FFIErrorCodeFromExtendStatusCode(detail->code(), fallback);
   }
 

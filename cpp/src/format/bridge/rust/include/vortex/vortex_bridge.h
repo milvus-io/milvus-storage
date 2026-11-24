@@ -25,7 +25,8 @@ class RecordBatchReader;
 namespace milvus_storage::vortex {
 
 namespace internal {
-std::shared_ptr<arrow::RecordBatchReader> WrapVortexRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner);
+std::shared_ptr<arrow::RecordBatchReader> WrapVortexRecordBatchReader(
+    std::shared_ptr<arrow::RecordBatchReader> inner, std::shared_ptr<const void> metadata_owner = nullptr);
 }  // namespace internal
 
 enum class PType : uint8_t {

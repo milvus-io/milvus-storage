@@ -161,11 +161,13 @@ class FormatReader {
   // independent readers with different projections or filters from the same
   // cached metadata.
   template <typename ReaderT>
-  static arrow::Result<std::shared_ptr<ReaderT>> create_from_metadata(MetadataPtr<ReaderT> metadata,
-                                                                      const api::ColumnGroupFile& file,
-                                                                      const std::shared_ptr<arrow::Schema>& read_schema,
-                                                                      const std::vector<std::string>& needed_columns,
-                                                                      const std::string& predicate);
+  static arrow::Result<std::shared_ptr<ReaderT>> create_from_metadata(
+      MetadataPtr<ReaderT> metadata,
+      const api::ColumnGroupFile& file,
+      const std::shared_ptr<arrow::Schema>& read_schema,
+      const std::vector<std::string>& needed_columns,
+      const std::string& predicate,
+      const std::shared_ptr<const api::Properties>& properties = nullptr);
 
   // create format reader
   static arrow::Result<std::shared_ptr<FormatReader>> create(
@@ -214,7 +216,8 @@ concept FormatReaderWithMetadata =
         ReaderT::MetaTrait::load_metadata(file, properties, key_retriever)
       } -> std::same_as<arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>>;
       {
-        ReaderT::MetaTrait::create_from_metadata(metadata, metadata_file, read_schema, needed_columns, predicate)
+        ReaderT::MetaTrait::create_from_metadata(metadata, metadata_file, read_schema, needed_columns, predicate,
+                                                 properties)
       } -> std::same_as<arrow::Result<std::shared_ptr<ReaderT>>>;
       { metadata->row_group_infos } -> std::same_as<const std::vector<RowGroupInfo>&>;
       { metadata->file_schema } -> std::same_as<const std::shared_ptr<arrow::Schema>&>;
@@ -235,7 +238,8 @@ concept FormatReaderWithAsyncMetadata =
         ReaderT::MetaTrait::load_metadata_async(file, properties, key_retriever)
       } -> std::same_as<folly::SemiFuture<arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>>>;
       {
-        ReaderT::MetaTrait::create_from_metadata_async(metadata, file, read_schema, needed_columns, predicate)
+        ReaderT::MetaTrait::create_from_metadata_async(metadata, file, read_schema, needed_columns, predicate,
+                                                       properties)
       } -> std::same_as<folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>>>;
     };
 
@@ -256,11 +260,13 @@ arrow::Result<std::shared_ptr<ReaderT>> FormatReader::create_from_metadata(
     const api::ColumnGroupFile& file,
     const std::shared_ptr<arrow::Schema>& read_schema,
     const std::vector<std::string>& needed_columns,
-    const std::string& predicate) {
+    const std::string& predicate,
+    const std::shared_ptr<const api::Properties>& properties) {
   static_assert(FormatReaderWithMetadata<ReaderT>,
                 "ReaderT must derive from FormatReader and define MetaTrait with Payload, Metadata, MetadataPtr, "
                 "cache_key, load_metadata, and create_from_metadata.");
-  return ReaderT::MetaTrait::create_from_metadata(metadata, file, read_schema, needed_columns, predicate);
+  return ReaderT::MetaTrait::create_from_metadata(std::move(metadata), file, read_schema, needed_columns, predicate,
+                                                  properties);
 }
 
 }  // namespace milvus_storage

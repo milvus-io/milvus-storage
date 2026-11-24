@@ -370,6 +370,9 @@ TEST_P(APIWriterReaderTest, SingleColumnGroupWriteRead) {
   ASSERT_OK(batch_reader->ReadNext(&batch));
   EXPECT_EQ(batch, nullptr);  // Should be at end
   batch_reader.reset();
+  // Shared metadata retains its loading configuration after the last Reader
+  // is gone. Eviction must release that final cache-owned reference.
+  ASSERT_STATUS_OK(EvictUnpinnedMetadataForTests());
   EXPECT_TRUE(weak_reader_properties.expired());
 }
 

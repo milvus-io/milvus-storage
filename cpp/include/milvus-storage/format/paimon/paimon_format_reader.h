@@ -48,6 +48,7 @@ class PaimonFormatReader final : public FormatReader {
       // that cost per-descriptor instead of per-reader. Streams opened from
       // it are per-reader and per-projection.
       std::shared_ptr<BlockingPaimonDataSplitReader> split_reader_handle;
+      std::shared_ptr<const api::Properties> properties;
       uint64_t record_count = 0;
       uint64_t physical_row_count = 0;
     };
@@ -64,7 +65,8 @@ class PaimonFormatReader final : public FormatReader {
         const api::ColumnGroupFile& file,
         const std::shared_ptr<arrow::Schema>& read_schema,
         const std::vector<std::string>& needed_columns,
-        const std::string& predicate);
+        const std::string& predicate,
+        const std::shared_ptr<const api::Properties>& properties = nullptr);
   };
 
   ~PaimonFormatReader() override;
@@ -88,7 +90,8 @@ class PaimonFormatReader final : public FormatReader {
                      std::shared_ptr<FormatReader> direct_file_reader,
                      std::shared_ptr<BlockingPaimonDataSplitReader> split_reader,
                      std::vector<std::string> split_columns,
-                     std::shared_ptr<arrow::Schema> output_schema);
+                     std::shared_ptr<arrow::Schema> output_schema,
+                     std::shared_ptr<const api::Properties> properties);
   [[nodiscard]] bool is_data_split() const;
 
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> filter_direct_batch(
@@ -98,6 +101,10 @@ class PaimonFormatReader final : public FormatReader {
   [[nodiscard]] arrow::Result<std::unique_ptr<DataSplitStreamCursor>> make_data_split_cursor() const;
 
   MetaTrait::MetadataPtr metadata_;
+  std::shared_ptr<const api::Properties> properties_;
+  // Alias cached vectors unless this reader requests different logical chunks.
+  std::shared_ptr<const std::vector<RowGroupInfo>> row_group_infos_;
+  std::shared_ptr<const std::vector<RowGroupInfo>> direct_physical_row_groups_;
   api::ColumnGroupFile file_;
   std::shared_ptr<arrow::Schema> read_schema_;
   std::vector<std::string> needed_columns_;

@@ -16,7 +16,9 @@ namespace {
 
 class VortexErrorTranslatingReader final : public arrow::RecordBatchReader {
   public:
-  explicit VortexErrorTranslatingReader(std::shared_ptr<arrow::RecordBatchReader> inner) : inner_(std::move(inner)) {}
+  VortexErrorTranslatingReader(std::shared_ptr<arrow::RecordBatchReader> inner,
+                               std::shared_ptr<const void> metadata_owner)
+      : metadata_owner_(std::move(metadata_owner)), inner_(std::move(inner)) {}
 
   std::shared_ptr<arrow::Schema> schema() const override { return inner_->schema(); }
 
@@ -29,14 +31,17 @@ class VortexErrorTranslatingReader final : public arrow::RecordBatchReader {
   }
 
   private:
+  // Release the native stream before returning its metadata Pin to the cache.
+  std::shared_ptr<const void> metadata_owner_;
   std::shared_ptr<arrow::RecordBatchReader> inner_;
 };
 
 }  // namespace
 
 namespace internal {
-std::shared_ptr<arrow::RecordBatchReader> WrapVortexRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner) {
-  return std::make_shared<VortexErrorTranslatingReader>(std::move(inner));
+std::shared_ptr<arrow::RecordBatchReader> WrapVortexRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner,
+                                                                      std::shared_ptr<const void> metadata_owner) {
+  return std::make_shared<VortexErrorTranslatingReader>(std::move(inner), std::move(metadata_owner));
 }
 }  // namespace internal
 

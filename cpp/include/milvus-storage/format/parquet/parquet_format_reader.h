@@ -57,13 +57,15 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
         const api::ColumnGroupFile& file,
         const std::shared_ptr<arrow::Schema>& read_schema,
         const std::vector<std::string>& needed_columns,
-        const std::string& predicate);
+        const std::string& predicate,
+        const std::shared_ptr<const api::Properties>& properties = nullptr);
     static folly::SemiFuture<arrow::Result<std::shared_ptr<ParquetFormatReader>>> create_from_metadata_async(
         MetadataPtr metadata,
         const api::ColumnGroupFile& file,
         const std::shared_ptr<arrow::Schema>& read_schema,
         const std::vector<std::string>& needed_columns,
-        const std::string& predicate);
+        const std::string& predicate,
+        const std::shared_ptr<const api::Properties>& properties = nullptr);
 
  private:
     // Implementation detail, not part of FormatReaderWithMetadata. This helper
@@ -137,6 +139,8 @@ class ParquetFormatReader final : public FormatReader, public std::enable_shared
 
   ParquetFormatReader(const ParquetFormatReader& other, std::shared_ptr<::parquet::arrow::FileReader> file_reader);
 
+  // The metadata handle owns the cache Pin and outlives all reader state.
+  MetaTrait::MetadataPtr metadata_;
   std::string path_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;

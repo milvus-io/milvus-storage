@@ -48,8 +48,10 @@ struct PaimonTestTableInfo {
 arrow::Status MakePaimonBridgeErrorStatus(std::string_view message);
 
 namespace internal {
-std::shared_ptr<arrow::RecordBatchReader> WrapPaimonRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner,
-                                                                      std::shared_ptr<arrow::Schema> output_schema);
+std::shared_ptr<arrow::RecordBatchReader> WrapPaimonRecordBatchReader(
+    std::shared_ptr<arrow::RecordBatchReader> inner,
+    std::shared_ptr<arrow::Schema> output_schema,
+    std::shared_ptr<const void> metadata_owner = nullptr);
 }  // namespace internal
 
 arrow::Result<std::vector<PaimonFileInfo>> PlanFiles(const std::string& table_location,
