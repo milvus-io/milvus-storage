@@ -516,13 +516,11 @@ TEST_F(SegmentWriterTest, WriteWithNullText) {
 
   ASSERT_STATUS_OK(writer->Write(batch->Slice(0, 2)));
   ASSERT_STATUS_OK(writer->Write(batch->Slice(2, 1)));
-  std::span<const LoonTextWriteSummary> summaries;
-  auto close_result = writer->Close(&summaries);
-  ASSERT_TRUE(close_result.ok()) << close_result.status().message();
+  ASSERT_AND_ASSIGN(auto output, writer->Close());
 
-  ASSERT_EQ(summaries.size(), 2);
+  ASSERT_EQ(output.text_summaries.size(), 2);
   std::map<int64_t, int64_t> bytes_by_field;
-  for (const auto& summary : summaries) {
+  for (const auto& summary : output.text_summaries) {
     EXPECT_EQ(summary.total_entries, batch->num_rows()) << "field " << summary.field_id;
     bytes_by_field.emplace(summary.field_id, summary.total_bytes);
   }
@@ -534,9 +532,8 @@ TEST_F(SegmentWriterTest, BinaryLobHasNoTextSummary) {
   config_.lob_columns.at(101).data_type = lob_column::LobDataType::kBinary;
   ASSERT_AND_ASSIGN(auto schema, schema_->SetField(1, schema_->field(1)->WithType(arrow::binary())));
   ASSERT_AND_ASSIGN(auto writer, SegmentWriter::Create(fs_, schema, config_));
-  std::span<const LoonTextWriteSummary> summaries;
-  ASSERT_STATUS_OK(writer->Close(&summaries).status());
-  EXPECT_TRUE(summaries.empty());
+  ASSERT_AND_ASSIGN(auto output, writer->Close());
+  EXPECT_TRUE(output.text_summaries.empty());
 }
 
 // test schema without TEXT columns
@@ -580,12 +577,8 @@ TEST_F(SegmentWriterTest, SchemaWithoutLobColumns) {
   ASSERT_STATUS_OK(writer->Write(batch));
 
   // close
-  std::span<const LoonTextWriteSummary> summaries;
-  auto close_result = writer->Close(&summaries);
-  ASSERT_TRUE(close_result.ok()) << close_result.status().message();
-  EXPECT_TRUE(summaries.empty());
-
-  auto output = std::move(close_result).ValueOrDie();
+  ASSERT_AND_ASSIGN(auto output, writer->Close());
+  EXPECT_TRUE(output.text_summaries.empty());
   ASSERT_NE(output.column_groups, nullptr);
 
   // commit via Transaction

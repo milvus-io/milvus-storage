@@ -169,12 +169,7 @@ class SegmentWriterImpl : public SegmentWriter {
     return arrow::Status::OK();
   }
 
-  arrow::Result<SegmentWriteOutput> Close() override { return Close(nullptr); }
-
-  arrow::Result<SegmentWriteOutput> Close(std::span<const LoonTextWriteSummary>* summaries) override {
-    if (summaries) {
-      *summaries = {};
-    }
+  arrow::Result<SegmentWriteOutput> Close() override {
     if (closed_) {
       return arrow::Status::Invalid("writer is already closed");
     }
@@ -200,13 +195,13 @@ class SegmentWriterImpl : public SegmentWriter {
     ARROW_ASSIGN_OR_RAISE(auto column_groups, writer_->close());
     stats_.parquet_files_created = column_groups->size();
 
-    // build LOB file info and requested TEXT summaries after all writers close
+    // build LOB file info and TEXT summaries after all writers close
     std::vector<api::LobFileInfo> lob_file_infos;
     text_summaries_.clear();
     for (const auto& [col_idx, lob_files] : lob_file_results_) {
       auto field = original_schema_->field(col_idx);
       auto field_id = GetFieldId(field);
-      if (summaries && config_.lob_columns.at(field_id).data_type == lob_column::LobDataType::kText) {
+      if (config_.lob_columns.at(field_id).data_type == lob_column::LobDataType::kText) {
         const auto counters = lob_writers_.at(col_idx)->GetStats();
         text_summaries_.push_back({field_id, counters.total_entries, counters.total_bytes});
       }
@@ -222,15 +217,13 @@ class SegmentWriterImpl : public SegmentWriter {
       }
     }
 
-    if (summaries) {
-      *summaries = text_summaries_;
-    }
     closed_ = true;
 
     SegmentWriteOutput output;
     output.column_groups = column_groups;
     output.lob_files = std::move(lob_file_infos);
     output.rows_written = written_rows_;
+    output.text_summaries = text_summaries_;
 
     return output;
   }

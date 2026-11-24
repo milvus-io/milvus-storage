@@ -1069,9 +1069,6 @@ FFI_EXPORT LoonFFIResult loon_segment_writer_write(LoonSegmentWriterHandle handl
  */
 FFI_EXPORT LoonFFIResult loon_segment_writer_flush(LoonSegmentWriterHandle handle);
 
-// The original binary symbol accepts a smaller caller-allocated output.
-#define loon_segment_writer_close loon_segment_writer_close_v2
-
 /**
  * @brief Closes the writer and returns column groups, LOB files, and TEXT summaries.
  *

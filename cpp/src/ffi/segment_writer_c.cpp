@@ -151,15 +151,14 @@ LoonFFIResult loon_segment_writer_flush(LoonSegmentWriterHandle handle) {
   RETURN_UNREACHABLE();
 }
 
-static LoonFFIResult CloseSegmentWriter(LoonSegmentWriterHandle handle, void* out_output, size_t output_size) {
+LoonFFIResult loon_segment_writer_close(LoonSegmentWriterHandle handle, LoonSegmentWriteOutput* out_output) {
   auto* writer = reinterpret_cast<SegmentWriter*>(handle);
   if (!writer || !out_output) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_output must not be null");
   }
 
   try {
-    std::span<const LoonTextWriteSummary> summaries;
-    auto result = writer->Close(output_size == sizeof(LoonSegmentWriteOutput) ? &summaries : nullptr);
+    auto result = writer->Close();
     RETURN_ARROW_ERROR_IF(result.status(), LOON_ARROW_ERROR, result.status().ToString());
 
     auto output = std::move(result).ValueOrDie();
@@ -180,25 +179,15 @@ static LoonFFIResult CloseSegmentWriter(LoonSegmentWriterHandle handle, void* ou
       }
     }
 
-    c_output.text_summaries = summaries.data();
-    c_output.num_text_summaries = summaries.size();
-    std::memcpy(out_output, &c_output, output_size);
+    c_output.text_summaries = output.text_summaries.data();
+    c_output.num_text_summaries = output.text_summaries.size();
+    *out_output = c_output;
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
   }
 
   RETURN_UNREACHABLE();
-}
-
-LoonFFIResult loon_segment_writer_close_v2(LoonSegmentWriterHandle handle, LoonSegmentWriteOutput* out_output) {
-  return CloseSegmentWriter(handle, out_output, sizeof(LoonSegmentWriteOutput));
-}
-
-// Binaries built with the original header allocate only the prefix ending at rows_written.
-#undef loon_segment_writer_close
-extern "C" FFI_EXPORT LoonFFIResult loon_segment_writer_close(LoonSegmentWriterHandle handle, void* legacy_output) {
-  return CloseSegmentWriter(handle, legacy_output, offsetof(LoonSegmentWriteOutput, text_summaries));
 }
 
 void loon_segment_write_output_free(LoonSegmentWriteOutput* output) {

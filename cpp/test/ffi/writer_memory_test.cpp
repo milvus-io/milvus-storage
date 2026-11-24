@@ -504,19 +504,5 @@ TEST_F(SegmentWriterMemoryTest, ImportFailuresReleaseEachColumnExactlyOnce) {
   ASSERT_NO_FATAL_FAILURE(CloseAndRead(batch));
 }
 
-// Call the symbol used by clients built with the original output layout.
-#undef loon_segment_writer_close
-extern "C" LoonFFIResult loon_segment_writer_close(LoonSegmentWriterHandle, void*);
-
-TEST_F(SegmentWriterMemoryTest, LegacyCloseWritesOnlyTheOriginalOutput) {
-  const LoonTextWriteSummary guard{};
-  output_.text_summaries = &guard;
-  output_.num_text_summaries = 42;
-  ASSERT_OK(CheckFFI(loon_segment_writer_close(writer_, &output_)));
-  EXPECT_NE(output_.column_groups, nullptr);
-  EXPECT_EQ(output_.rows_written, 0);
-  EXPECT_EQ(output_.text_summaries, &guard);
-  EXPECT_EQ(output_.num_text_summaries, 42);
-}
 }  // namespace
 }  // namespace milvus_storage::test

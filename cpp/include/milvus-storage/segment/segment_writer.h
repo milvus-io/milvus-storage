@@ -68,6 +68,9 @@ struct SegmentWriteOutput {
 
   // total number of rows written
   int64_t rows_written = 0;
+
+  // Borrowed TEXT encoder counters, valid until the writer is destroyed.
+  std::span<const LoonTextWriteSummary> text_summaries;
 };
 
 // legacy result (kept for backward compatibility with callers that manage Transaction externally)
@@ -146,6 +149,7 @@ class SegmentWriter {
   //   - column_groups: parquet file metadata
   //   - lob_files: LOB file metadata for TEXT columns
   //   - rows_written: total rows written
+  //   - text_summaries: encoder counters by TEXT field ID
   // does NOT commit manifest — caller must use Transaction to commit
   virtual arrow::Result<SegmentWriteOutput> Close() = 0;
 
@@ -168,14 +172,6 @@ class SegmentWriter {
 
   // check if the writer is closed
   virtual bool IsClosed() const = 0;
-
-  // If requested, the summaries from a successful close remain valid until the writer is destroyed.
-  virtual arrow::Result<SegmentWriteOutput> Close(std::span<const LoonTextWriteSummary>* text_summaries) {
-    if (text_summaries) {
-      *text_summaries = {};
-    }
-    return Close();
-  }
 
   protected:
   SegmentWriter() = default;
