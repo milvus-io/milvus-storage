@@ -42,6 +42,17 @@ const AIMD_INITIAL_RATE_KEY: &str = "lance_aimd_initial_rate";
 const AIMD_MAX_RATE_KEY: &str = "lance_aimd_max_rate";
 const MAX_LANCE_IO_PARALLELISM: usize = 256;
 
+/// Matches the C++ `ArrowFileSystemConfig::GetCacheKey()` format: `fs:` followed
+/// by a hex SHA-256 digest.
+fn is_filesystem_cache_key(value: &str) -> bool {
+    value.strip_prefix("fs:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
 pub(crate) fn native_mutation_store_params(
     mut storage_options: HashMap<String, String>,
 ) -> Result<ObjectStoreParams> {
@@ -108,20 +119,11 @@ impl FFIReadOptions {
             .ok_or_else(|| {
                 LanceError::invalid_input(format!("missing required option: {FS_CACHE_KEY}"))
             })?;
-        fs_cache_key
-            .strip_prefix("fs:")
-            .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
-            .ok_or_else(|| {
-                LanceError::invalid_input(format!(
-                    "{FS_CACHE_KEY} must have the form fs:<unsigned integer>"
-                ))
-            })?
-            .parse::<u64>()
-            .map_err(|_| {
-                LanceError::invalid_input(format!(
-                    "{FS_CACHE_KEY} must have the form fs:<unsigned integer>"
-                ))
-            })?;
+        if !is_filesystem_cache_key(&fs_cache_key) {
+            return Err(LanceError::invalid_input(format!(
+                "{FS_CACHE_KEY} must have the form fs:<64 lowercase hex digits>"
+            )));
+        }
 
         let is_local_value = options.remove(FS_IS_LOCAL_KEY).ok_or_else(|| {
             LanceError::invalid_input(format!("missing required option: {FS_IS_LOCAL_KEY}"))
@@ -467,9 +469,12 @@ mod tests {
         assert!(native_mutation_store_params(static_options).is_ok());
     }
 
+    const TEST_FS_CACHE_KEY: &str =
+        "fs:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     fn valid_filesystem_read_options(is_local: bool) -> HashMap<String, String> {
         let mut options = HashMap::from([
-            (FS_CACHE_KEY.into(), "fs:123".into()),
+            (FS_CACHE_KEY.into(), TEST_FS_CACHE_KEY.into()),
             (FS_IS_LOCAL_KEY.into(), is_local.to_string()),
             (LANCE_IO_PARALLELISM_KEY.into(), "64".into()),
             (AIMD_INITIAL_RATE_KEY.into(), "2000".into()),
@@ -493,6 +498,20 @@ mod tests {
         let mut missing_cache_key = valid_filesystem_read_options(false);
         missing_cache_key.remove(FS_CACHE_KEY);
         assert!(FFIReadOptions::parse(missing_cache_key).is_err());
+
+        for invalid_key in [
+            "fs:123",
+            "fs:",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "fs:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
+            "fs:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde",
+            "fs:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
+            "fs:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg",
+        ] {
+            let mut options = valid_filesystem_read_options(false);
+            options.insert(FS_CACHE_KEY.into(), invalid_key.into());
+            assert!(FFIReadOptions::parse(options).is_err(), "{invalid_key}");
+        }
 
         let mut invalid_bool = valid_filesystem_read_options(false);
         invalid_bool.insert(FS_IS_LOCAL_KEY.into(), "remote".into());
@@ -566,7 +585,7 @@ mod tests {
                 .from_url(&Url::parse("s3://other/table").unwrap())
                 .is_err()
         );
-        assert_eq!(options.object_store_prefix(), "fs:123");
+        assert_eq!(options.object_store_prefix(), TEST_FS_CACHE_KEY);
 
         assert!(!options.object_store_prefix().contains("0x"));
     }
@@ -576,14 +595,14 @@ mod tests {
         let inner = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
         let store = build_unwrapped_ffi_store(
             inner.clone(),
-            "fs:123",
+            TEST_FS_CACHE_KEY,
             64 * 1024,
             64,
             DEFAULT_DOWNLOAD_RETRY_COUNT,
         );
 
         assert!(Arc::ptr_eq(&store.inner, &inner));
-        assert_eq!(store.store_prefix, "fs:123");
+        assert_eq!(store.store_prefix, TEST_FS_CACHE_KEY);
         assert_eq!(store.scheme(), "file-object-store");
     }
 
