@@ -113,7 +113,8 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
     if (!read_size.ok()) {
       return arrow::Future<int64_t>::MakeFinished(read_size.status());
     }
-    const bool use_talon = ShouldUseTalon(nbytes);
+    const auto requested_bytes = nbytes;
+    const bool use_talon = ShouldUseTalon(requested_bytes);
     nbytes = read_size.ValueOrDie();
     if (nbytes > 0 && out == nullptr) {
       return arrow::Future<int64_t>::MakeFinished(
@@ -131,7 +132,8 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
       return arrow::Future<int64_t>::MakeFinished(origin_file->ReadAt(position, nbytes, out));
     }
 
-    return EnsureReaderAsync().Then([position, nbytes, out, state = state_, metrics = state_->filesystem->metrics](
+    return EnsureReaderAsync().Then([position, nbytes, out, use_exact = ShouldUseExactRead(requested_bytes),
+                                     state = state_, metrics = state_->filesystem->metrics](
                                         const Reader& reader) -> arrow::Future<int64_t> {
       auto read_size = GetReadSize(position, nbytes, reader->KnownSize());
       if (!read_size.ok()) {
@@ -145,7 +147,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
       metrics->IncrementReadCount();
       // A failed Talon read can have written a prefix. Retry the entire range.
       return WithOriginFallback(
-          ReadFromTalon(reader, state->filesystem->config, position, length, out), state, metrics,
+          ReadFromTalon(reader, use_exact, position, length, out), state, metrics,
           [position, length, out](NonBlockingRandomAccessFile& file) {
             return file.ReadAtAsyncInto(position, length, out);
           },
@@ -168,7 +170,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
     ARROW_ASSIGN_OR_RAISE(const auto reader, EnsureReaderAsync().result());
     ARROW_ASSIGN_OR_RAISE(nbytes, GetReadSize(position, nbytes, reader->KnownSize()));
     ARROW_ASSIGN_OR_RAISE(auto buffer, arrow::AllocateResizableBuffer(nbytes, pool_));
-    ARROW_ASSIGN_OR_RAISE(const int64_t bytes_read, ReadAt(position, nbytes, buffer->mutable_data()));
+    ARROW_ASSIGN_OR_RAISE(const int64_t bytes_read, ReadAt(position, requested_bytes, buffer->mutable_data()));
     ARROW_RETURN_NOT_OK(buffer->Resize(bytes_read));
     return std::shared_ptr<arrow::Buffer>(std::move(buffer));
   }
@@ -180,7 +182,8 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
     if (!read_size.ok()) {
       return arrow::Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(read_size.status());
     }
-    const bool use_talon = ShouldUseTalon(nbytes);
+    const auto requested_bytes = nbytes;
+    const bool use_talon = ShouldUseTalon(requested_bytes);
     nbytes = read_size.ValueOrDie();
     if (nbytes == 0) {
       return arrow::Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(std::make_shared<arrow::Buffer>(nullptr, 0));
@@ -190,7 +193,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
       return state_->origin_file->ReadAsync(io_context, position, nbytes);
     }
     return EnsureReaderAsync().Then(
-        [position, nbytes, pool = io_context.pool(), state = state_,
+        [position, nbytes, use_exact = ShouldUseExactRead(requested_bytes), pool = io_context.pool(), state = state_,
          metrics = state_->filesystem->metrics](const Reader& reader) -> arrow::Future<std::shared_ptr<arrow::Buffer>> {
           // A cold open has no size yet. Resolve and clamp before allocating,
           // including when the caller supplies a large read extending past EOF.
@@ -211,7 +214,7 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
           auto* const out = buffer->mutable_data();
           metrics->IncrementReadCount();
           return WithOriginFallback(
-                     ReadFromTalon(reader, state->filesystem->config, position, length, out), state, metrics,
+                     ReadFromTalon(reader, use_exact, position, length, out), state, metrics,
                      [position, length, out](NonBlockingRandomAccessFile& file) {
                        return file.ReadAtAsyncInto(position, length, out);
                      },
@@ -296,16 +299,17 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
            (config.talon_mode == TalonMode::SmallReads && requested_bytes <= config.talon_small_read_threshold);
   }
 
-  static arrow::Future<int64_t> ReadFromTalon(const Reader& reader,
-                                              const ArrowFileSystemConfig& config,
-                                              const int64_t position,
-                                              const int64_t length,
-                                              uint8_t* const out) {
+  bool ShouldUseExactRead(int64_t requested_bytes) const {
+    // Open-only routing uses a strict cutoff. The Talon SDK itself accepts 1 MiB.
+    return state_->filesystem->config.talon_open_only &&
+           static_cast<uint64_t>(requested_bytes) < kTalonMaxExactReadBytes;
+  }
+
+  static arrow::Future<int64_t> ReadFromTalon(
+      const Reader& reader, bool use_exact, int64_t position, int64_t length, uint8_t* out) {
     const auto offset = static_cast<uint64_t>(position);
     const auto nbytes = static_cast<uint64_t>(length);
-    // Open-only (-meta) mode only caches metadata/footer ranges on Talon; use exact reads
-    // up to Talon's 1 MiB limit so ranges land in small storage instead of allocating block metadata.
-    if (config.talon_open_only && nbytes <= kTalonMaxExactReadBytes) {
+    if (use_exact) {
       return reader->ReadExactAtAsync(offset, nbytes, out);
     }
     return reader->ReadAtAsync(offset, nbytes, out);

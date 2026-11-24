@@ -1143,7 +1143,7 @@ mod tests {
         }
 
         let run = |reader: *const c_void, offset: u64, length: u64, dst: *mut u8| {
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = mpsc::channel::<(i32, u64, String)>();
             let ctx = Box::into_raw(Box::new(tx)) as *mut c_void;
             unsafe {
                 talon_object_read_exact_async(reader, offset, length, dst, capture_callback, ctx);

@@ -86,7 +86,7 @@ class TalonObjectReader final {
   arrow::Future<int64_t> ReadAtAsync(uint64_t offset, uint64_t length, uint8_t* dst) const;
 
   /// Reads an exact range (at most `kTalonMaxExactReadBytes`) into caller-owned memory
-  /// using Talon's small-storage-backed exact read API on the shared Tokio runtime.
+  /// using Talon's exact read API on the shared Tokio runtime.
   /// `dst` must remain valid until the returned future completes.
   arrow::Future<int64_t> ReadExactAtAsync(uint64_t offset, uint64_t length, uint8_t* dst) const;
 
