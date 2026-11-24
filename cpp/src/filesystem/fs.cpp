@@ -155,7 +155,12 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
     if (!use_iam || credential_endpoint.empty()) {
       hash_combine(gcp_target_service_account);
     }
-    if (!use_iam) {
+    const bool native_target_with_iam = use_iam && credential_endpoint.empty() && !gcp_target_service_account.empty();
+    const bool has_hmac = !access_key_id.empty() && !access_key_value.empty();
+    if (native_target_with_iam) {
+      hash_combine(has_hmac);
+    }
+    if (!use_iam || (native_target_with_iam && has_hmac && talon_mode != TalonMode::Disabled)) {
       hash_combine(access_key_id);
       hash_combine(access_key_value);
     }
