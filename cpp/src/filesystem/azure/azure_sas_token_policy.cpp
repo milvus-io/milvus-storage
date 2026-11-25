@@ -19,6 +19,7 @@
 #include <iomanip>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -34,6 +35,7 @@
 namespace milvus_storage::fs {
 
 static constexpr auto kRefreshOffset = std::chrono::seconds(60);
+static constexpr int kMaxRetries = 3;
 
 struct AzureSasTokenPolicy::SharedState {
   struct CachedSasToken {
@@ -44,7 +46,8 @@ struct AzureSasTokenPolicy::SharedState {
   AzureSasBrokerConfig config;
   std::shared_ptr<Azure::Core::Http::HttpTransport> transport;
   Clock clock;
-  std::mutex mutex;
+  std::mutex cache_mutex;
+  std::mutex refresh_mutex;
   std::optional<CachedSasToken> cached;
 };
 
@@ -91,7 +94,8 @@ AzureSasTokenPolicy::AzureSasTokenPolicy(AzureSasBrokerConfig config,
 
 bool AzureSasTokenPolicy::IsFresh(TimePoint expires_at, TimePoint now) { return expires_at - now > kRefreshOffset; }
 
-arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint now, TimePoint* expires_at) const {
+arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint* expires_at, bool* retryable) const {
+  *retryable = false;
   const nlohmann::json request_json = {
       {"csp", "azure"},
       {"region", state_->config.region},
@@ -117,10 +121,12 @@ arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint now, Tim
     request.SetHeader("Content-Length", std::to_string(request_bytes.size()));
 
     // The injected clock controls credential freshness only. Azure evaluates
-    // context deadlines against the real system clock.
+    // context deadlines against the real system clock. Each attempt gets its
+    // own request timeout, including reading the response body.
     const auto deadline = Azure::DateTime(std::chrono::system_clock::now() +
                                           std::chrono::milliseconds(state_->config.request_timeout_ms));
     const auto context = Azure::Core::Context().WithDeadline(deadline);
+    *retryable = true;  // Transport and body-read failures are transient.
     auto response = state_->transport->Send(request, context);
     request_completed = true;
     if (!response) {
@@ -129,6 +135,7 @@ arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint now, Tim
     }
     const int status_code = static_cast<int>(response->GetStatusCode());
     if (status_code < 200 || status_code >= 300) {
+      *retryable = status_code == 429 || (status_code >= 500 && status_code < 600);
       return arrow::Status::IOError(
           "Azure SAS credential broker returned an HTTP error: endpoint=", state_->config.endpoint,
           ", status_code=", status_code, ", reason=", response->GetReasonPhrase());
@@ -139,6 +146,7 @@ arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint now, Tim
       response_body = body_stream->ReadToEnd(context);
     }
     response_body_read_completed = true;
+    *retryable = false;  // Denials and invalid broker responses invalidate the cached SAS.
     response_size = response_body.size();
     const auto response_json = nlohmann::json::parse(response_body.begin(), response_body.end());
     response_json.get_to(broker_response);
@@ -169,14 +177,7 @@ arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint now, Tim
     }
 
     const auto parsed = Azure::DateTime::Parse(broker_response.token.expired_at, Azure::DateTime::DateFormat::Rfc3339);
-    const auto expiration = static_cast<std::chrono::system_clock::time_point>(parsed);
-    if (expiration <= now) {
-      return arrow::Status::IOError(
-          "Azure SAS credential broker returned an expired token: expiredAt=", broker_response.token.expired_at,
-          ", current_time=", Azure::DateTime(now).ToString(Azure::DateTime::DateFormat::Rfc3339));
-    }
-
-    *expires_at = expiration;
+    *expires_at = static_cast<TimePoint>(parsed);
     return sas_token;
   } catch (const nlohmann::json::parse_error& error) {
     return arrow::Status::IOError(
@@ -199,33 +200,70 @@ arrow::Result<std::string> AzureSasTokenPolicy::FetchSasToken(TimePoint now, Tim
 }
 
 arrow::Result<std::string> AzureSasTokenPolicy::GetSasToken() const {
-  std::lock_guard<std::mutex> lock(state_->mutex);
-  const auto now = state_->clock();
-  if (state_->cached.has_value() && IsFresh(state_->cached->expires_at, now)) {
-    return state_->cached->sas_token;
+  std::unique_lock refresh_lock(state_->refresh_mutex, std::defer_lock);
+  {
+    std::unique_lock cache_lock(state_->cache_mutex);
+    const auto now = state_->clock();
+    if (state_->cached && IsFresh(state_->cached->expires_at, now)) {
+      return state_->cached->sas_token;
+    }
+    if (!refresh_lock.try_lock()) {
+      // A concurrent refresh may wait on the broker. Valid readers can proceed.
+      if (state_->cached && state_->cached->expires_at > now) {
+        return state_->cached->sas_token;
+      }
+      cache_lock.unlock();
+      refresh_lock.lock();
+      cache_lock.lock();
+      if (state_->cached && IsFresh(state_->cached->expires_at, state_->clock())) {
+        return state_->cached->sas_token;
+      }
+    }
   }
 
-  TimePoint expires_at;
-  const bool had_cached_sas = state_->cached.has_value();
-  auto fetched = FetchSasToken(now, &expires_at);
-  if (fetched.ok()) {
-    state_->cached = SharedState::CachedSasToken{std::move(fetched).ValueOrDie(), expires_at};
-    LOG_STORAGE_DEBUG_ << "Azure SAS credential broker refresh succeeded: endpoint=" << state_->config.endpoint
-                       << ", account=" << state_->config.account_name << ", bucket=" << state_->config.bucket
-                       << ", region=" << state_->config.region << ", had_cached_sas=" << std::boolalpha
-                       << had_cached_sas
-                       << ", expires_at=" << Azure::DateTime(expires_at).ToString(Azure::DateTime::DateFormat::Rfc3339);
-    return state_->cached->sas_token;
-  }
+  for (int retries = 0;; ++retries) {
+    bool retryable = false;
+    TimePoint expires_at;
+    auto fetched = FetchSasToken(&expires_at, &retryable);
+    {
+      std::lock_guard cache_lock(state_->cache_mutex);
+      // Check both new and cached credentials after the broker round trip.
+      const auto now = state_->clock();
+      if (fetched.ok()) {
+        if (expires_at <= now) {
+          state_->cached.reset();
+          return arrow::Status::IOError(
+              "Azure SAS credential broker returned an expired token: expiredAt=",
+              Azure::DateTime(expires_at).ToString(Azure::DateTime::DateFormat::Rfc3339),
+              ", current_time=", Azure::DateTime(now).ToString(Azure::DateTime::DateFormat::Rfc3339));
+        }
+        LOG_STORAGE_DEBUG_ << "Azure SAS credential broker refresh succeeded: endpoint=" << state_->config.endpoint
+                           << ", account=" << state_->config.account_name << ", bucket=" << state_->config.bucket
+                           << ", region=" << state_->config.region << ", had_cached_sas=" << std::boolalpha
+                           << state_->cached.has_value() << ", expires_at="
+                           << Azure::DateTime(expires_at).ToString(Azure::DateTime::DateFormat::Rfc3339);
+        state_->cached = SharedState::CachedSasToken{std::move(fetched).ValueOrDie(), expires_at};
+        return state_->cached->sas_token;
+      }
+      if (!retryable) {
+        state_->cached.reset();
+        return fetched.status();
+      }
+      if (state_->cached && state_->cached->expires_at > now) {
+        LOG_STORAGE_WARNING_ << "Azure SAS credential broker refresh failed, using valid cached SAS: "
+                             << fetched.status();
+        return state_->cached->sas_token;
+      }
+    }
 
-  const bool cached_expired = had_cached_sas && state_->cached->expires_at <= now;
-  LOG_STORAGE_WARNING_ << "Azure SAS credential broker refresh failed: " << fetched.status().ToString()
-                       << ", has_cached_sas=" << std::boolalpha << had_cached_sas
-                       << ", cached_expired=" << std::boolalpha << cached_expired;
-  if (had_cached_sas) {
-    return state_->cached->sas_token;
+    if (retries == kMaxRetries) {
+      return fetched.status();
+    }
+    const auto delay = std::chrono::milliseconds(200 << retries);
+    LOG_STORAGE_WARNING_ << "Azure SAS credential broker request failed: " << fetched.status()
+                         << ", retry=" << retries + 1 << "/" << kMaxRetries << ", retry_delay_ms=" << delay.count();
+    std::this_thread::sleep_for(delay);
   }
-  return fetched.status();
 }
 
 AzureSasTokenPolicy::~AzureSasTokenPolicy() = default;

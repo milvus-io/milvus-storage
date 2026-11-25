@@ -27,6 +27,7 @@ corrosion_add_cxxbridge(rust-bridge
 target_include_directories(rust-bridge PUBLIC ${Arrow_INCLUDE_DIRS}
     ${CMAKE_CURRENT_BINARY_DIR}/corrosion_generated/cxxbridge/rust-bridge/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/include
 )
 
 file(GLOB_RECURSE CPP_SOURCE_FILE CONFIGURE_DEPENDS

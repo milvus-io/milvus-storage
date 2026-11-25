@@ -15,17 +15,18 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include <stdexcept>
+
+#include <arrow/result.h>
+
+namespace arrow::fs {
+class FileSystem;
+}
 
 namespace milvus_storage::iceberg {
-
-class IcebergException : public std::runtime_error {
-  public:
-  explicit IcebergException(const std::string& message) : std::runtime_error(message) {}
-};
 
 /// Per-file info returned from PlanFiles
 struct IcebergFileInfo {
@@ -40,11 +41,13 @@ struct IcebergFileInfo {
 ///
 /// @param metadata_location Table metadata location (e.g., "s3://bucket/table/metadata/v1.metadata.json")
 /// @param snapshot_id Which snapshot to scan
-/// @param storage_options S3/cloud config as key-value pairs
+/// @param filesystem Cached filesystem used for all planning reads
+/// @param read_options Credential-free filesystem identity options
 /// @return Vector of file info, one per data file in the snapshot
-std::vector<IcebergFileInfo> PlanFiles(const std::string& metadata_location,
-                                       int64_t snapshot_id,
-                                       const std::unordered_map<std::string, std::string>& storage_options);
+arrow::Result<std::vector<IcebergFileInfo>> PlanFiles(const std::string& metadata_location,
+                                                      int64_t snapshot_id,
+                                                      const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+                                                      const std::unordered_map<std::string, std::string>& read_options);
 
 /// Info returned after creating a test Iceberg table.
 struct IcebergTestTableInfo {
@@ -63,14 +66,15 @@ struct IcebergTestTableInfo {
 ///
 /// `record_scheme_override` — empty string means no override (the common case).
 /// Pass e.g. "gs" when physically writing via `s3://` S3-compat to GCS but
-/// intending to read via native `gs://` with SA impersonation; the Rust side
-/// will byte-rewrite the embedded scheme across every level of the metadata
-/// tree so iceberg-rust's `plan_files` can traverse it under a `gs://` FileIO.
-IcebergTestTableInfo CreateTestTable(const std::string& table_dir,
-                                     uint64_t num_rows,
-                                     bool with_positional_deletes,
-                                     const std::vector<int64_t>& deleted_positions,
-                                     const std::unordered_map<std::string, std::string>& storage_options = {},
-                                     const std::string& record_scheme_override = "");
+/// intending to read via `gs://` through the C++ filesystem; the Rust side will
+/// byte-rewrite the embedded scheme across every level of the metadata tree so
+/// iceberg-rust's `plan_files` can traverse it under a `gs://` FileIO.
+arrow::Result<IcebergTestTableInfo> CreateTestTable(
+    const std::string& table_dir,
+    uint64_t num_rows,
+    bool with_positional_deletes,
+    const std::vector<int64_t>& deleted_positions,
+    const std::unordered_map<std::string, std::string>& storage_options = {},
+    const std::string& record_scheme_override = "");
 
 }  // namespace milvus_storage::iceberg

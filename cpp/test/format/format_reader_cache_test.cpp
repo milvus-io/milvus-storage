@@ -46,7 +46,7 @@
 #include "milvus-storage/reader.h"
 #include "milvus-storage/thread_pool.h"
 #include "milvus-storage/writer.h"
-#include "iceberg_bridge.h"
+#include "iceberg/iceberg_bridge.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {
@@ -579,6 +579,11 @@ class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std:
   void SetUp() override {
     ASSERT_STATUS_OK(InitTestProperties(properties_));
     ASSERT_AND_ASSIGN(fs_config_, GetFileSystemConfig(properties_));
+    if (fs_config_.storage_type == "local" && GetParam() == LOON_FORMAT_ICEBERG_TABLE) {
+      // Iceberg records canonical local paths. Bind the fixture to the same root when /tmp is a symlink.
+      fs_config_.root_path = LocalRootPath().string();
+      ASSERT_EQ(api::SetValue(properties_, PROPERTY_FS_ROOT_PATH, fs_config_.root_path.c_str()), std::nullopt);
+    }
     ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
     ASSERT_STATUS_OK(MirrorDefaultExternalFilesystemConfig());
 
@@ -671,15 +676,11 @@ class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std:
   arrow::Result<std::shared_ptr<api::ColumnGroups>> WriteIcebergStressData() const {
     ARROW_ASSIGN_OR_RAISE(auto table_uri, MakeIcebergTableUri(base_path_ + "/iceberg"));
 
-    iceberg::IcebergTestTableInfo table_info;
-    std::vector<iceberg::IcebergFileInfo> file_infos;
-    try {
-      auto storage_options = iceberg::ToStorageOptions(fs_config_);
-      table_info = iceberg::CreateTestTable(table_uri, kExpectedRows, false, {}, storage_options);
-      file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
-    } catch (const std::exception& e) {
-      return arrow::Status::IOError("Failed to create Iceberg stress table: ", e.what());
-    }
+    ARROW_ASSIGN_OR_RAISE(auto storage_options, iceberg::ToWriterOptions(fs_config_));
+    ARROW_ASSIGN_OR_RAISE(auto table_info,
+                          iceberg::CreateTestTable(table_uri, kExpectedRows, false, {}, storage_options));
+    ARROW_ASSIGN_OR_RAISE(auto file_infos, iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, fs_,
+                                                              iceberg::ToReaderOptions(fs_config_)));
 
     if (file_infos.empty()) {
       return arrow::Status::Invalid("Iceberg PlanFiles returned no files");

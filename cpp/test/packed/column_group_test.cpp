@@ -28,7 +28,8 @@ class ColumnGroupTest : public ::testing::Test {
 
     for (int i = 0; i < num_columns; ++i) {
       std::vector<int32_t> values(num_rows, i);
-      auto array_data = arrow::ArrayData::Make(arrow::int32(), num_rows, {nullptr, arrow::Buffer::Wrap(values)});
+      auto array_data =
+          arrow::ArrayData::Make(arrow::int32(), num_rows, {nullptr, arrow::Buffer::FromVector(std::move(values))});
       arrays.push_back(arrow::MakeArray(array_data));
 
       std::string column_name = "column_" + std::to_string(i);

@@ -19,6 +19,7 @@
     loon_errcode_fault_inject;
     loon_errcode_not_support;
     loon_errcode_file_not_found;
+    loon_errcode_permission_denied;
     loon_errcode_aws_no_such_upload;
     loon_errcode_aws_conflict;
     loon_errcode_aws_precondition_failed;
@@ -174,6 +175,7 @@
     loon_filesystem_writer_close;
     loon_filesystem_writer_destroy;
     loon_filesystem_get_file_info;
+    loon_filesystem_get_object_info;
     loon_filesystem_read_file;
     loon_filesystem_open_reader;
     loon_filesystem_reader_readat;

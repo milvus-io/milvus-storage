@@ -40,39 +40,31 @@ vortex = { git = "https://github.com/zilliztech/vortex", rev = "088063f0fdf2dd9e
 vortex-btrblocks = { git = "https://github.com/zilliztech/vortex", rev = "088063f0fdf2dd9e6a3db7ed4bb8137e18ca5ee3" }
 
 # Lance Ecosystem
+# Cloud features remain enabled for native Lance writers. Lance reads use the
+# filesystem-backed reader ObjectStore.
 lance = { version = "=7.0.0", default-features = false, features = ["aws", "azure", "gcp", "oss"] }
 lance-core = "=7.0.0"
 lance-encoding = "=7.0.0"
 lance-file = "=7.0.0"
 lance-index = "=7.0.0"
-# `oss` feature activates lance-io's stock OssStoreProvider (registered against
-# the `oss://` scheme) plus `opendal/services-oss`. Our AliyunOssStoreProvider
-# overrides stock only when per-tenant `oss_role_arn` is present; single-tenant
-# env-driven OSS continues to go through stock.
 lance-io = { version = "=7.0.0", default-features = false, features = ["aws", "azure", "gcp", "oss"] }
 lance-table = "=7.0.0"
 
-# OSS backend for the AliyunOssStoreProvider in src/aliyun_oss_provider.rs.
-# Match the opendal version used by lance-io 7.0.0 so this provider does not
-# add another copy beyond Lance's 0.56 and Iceberg's existing 0.55. `services-oss`
-# is the only service this module uses; this project handles the two-step Aliyun
-# role_arn credential flow before handing static STS creds to opendal.
-opendal = { version = "0.56", features = ["services-oss"] }
-object_store_opendal = "0.56"
+# OpenDAL 0.56 interfaces used by the generic filesystem-backed bridge. No cloud
+# service is selected here: production reads delegate every operation to the C++ filesystem.
+opendal = "0.56"
+# Paimon uses OpenDAL 0.58; adapt it to the shared filesystem-backed bridge.
+opendal-paimon = { package = "opendal-core", version = "=0.58.0" }
 
 # Iceberg Ecosystem
-# iceberg 0.9 moved the opendal-backed storage implementations (s3/gcs/azdls/oss)
-# out of the core crate into a separate `iceberg-storage-opendal` crate. We enable
-# s3/gcs/azdls there, but deliberately NOT oss — OSS is handled by our own
-# `AliyunOssStorageFactory` in aliyun_oss_provider.rs so we can forward per-tenant
-# role_arn (OIDC) + the ECS-IMDS RAM flow, neither of which upstream's `OssConfig`
-# supports (it only accepts endpoint/AK/SK).
+# `iceberg-storage-opendal` is used only by the native `CreateTestTable` writer.
+# Its upstream backends support AK/SK or default IAM. Production planning instead
+# routes Iceberg reads through the filesystem-backed OpenDAL adapter and does not
+# construct those cloud providers.
 bytes = "1"
 iceberg = "0.9"
-iceberg-storage-opendal = { version = "0.9", features = ["opendal-s3", "opendal-gcs", "opendal-azdls"] }
-# Required for #[typetag::serde] on our custom Storage/StorageFactory impls that
-# plug into iceberg's FileIO pipeline. Pinned to match iceberg-storage-opendal's
-# own typetag dep so we don't end up with two typetag copies.
+iceberg-storage-opendal = { version = "0.9", features = ["opendal-s3", "opendal-gcs", "opendal-azdls", "opendal-oss"] }
+# Required for #[typetag::serde] on the filesystem-backed Iceberg adapter.
 typetag = "0.2"
 parquet = { version = "56.2.0", features = ["arrow"] }
 serde = { version = "1", features = ["derive"] }
@@ -80,34 +72,23 @@ serde_json = "1"
 chrono = "0.4"
 uuid = { version = "1", features = ["v7"] }
 
-# AWS SDK (for Lance AssumeRole credential provider)
-aws-config = "1"
-aws-credential-types = "1"
+# Shared ObjectStore and path types used by the filesystem-backed Lance reader
+# adapter and the Iceberg URI binding.
 object_store = { version = "0.13", features = ["aws", "gcp"] }
 
-# HTTP client for the GCP Service Account Impersonation flow in
-# gcp_impersonation.rs (calls metadata.google.internal + iamcredentials.googleapis.com).
-# Already in the transitive tree via lance-io / iceberg / reqsign; pinned here
-# to match those (0.12.x) and to opt into rustls (the workspace TLS choice).
+# Async adapter traits are shared by the filesystem adapters and Vortex layout strategy.
 async-trait = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-# `url::Url` is named in lance-io's ObjectStoreProvider::new_store signature
-# we implement; keep as a direct dep rather than leaning on transitive re-export.
+# URI parsing is shared by the Lance and Iceberg filesystem adapters.
 url = "2"
 
-# Crypto + encoding for Aliyun POP v1 signing in aliyun_oss_provider.rs
-# (ECS IMDS → sts:AssumeRole fallback when OIDC machine identity is absent).
-# All three are already in the transitive graph via reqsign / aws SDKs;
-# pin versions to match so we don't add duplicate copies.
-hmac = "0.12"
-sha1 = "0.10"
+# Paimon split encoding, checksum validation, and roaring deletion vectors.
 base64 = "0.22"
 crc32fast = "1"
 roaring = "0.11"
 
 # Apache Paimon planner and test writer. Keep the exact release and Cargo.lock
 # together. Paimon uses the Arrow 58 already present for Lance.
-paimon = { version = "=0.3.0", default-features = false, features = ["storage-fs", "storage-s3", "storage-oss", "storage-azdls", "storage-gcs", "vortex"] }
+paimon = { version = "=0.4.0", default-features = false, features = ["storage-fs", "storage-s3", "storage-oss", "storage-azdls", "storage-gcs", "vortex"] }
 
 # SQL predicate parsing
 sqlparser = "0.55"
@@ -117,8 +98,6 @@ cxx = "1.0.184"
 
 [dev-dependencies]
 tempfile = "3"
-# Match Paimon's OpenDAL type in snapshot error-classification tests.
-opendal-paimon = { package = "opendal-core", version = "=0.58.0" }
 
 [build-dependencies]
 cxx-build = "1.0.184"

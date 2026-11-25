@@ -49,9 +49,9 @@
 #include <folly/json.h>
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/format/paimon/paimon_common.h"
-#include "iceberg_bridge.h"
-#include "lance_bridge.h"
-#include "paimon_bridge.h"
+#include "iceberg/iceberg_bridge.h"
+#include "lance/lance_bridge.h"
+#include "paimon/paimon_bridge.h"
 
 using milvus_storage::FilesystemCache;
 using milvus_storage::FormatReader;
@@ -270,7 +270,12 @@ static int DoDemoTable(int argc, char** argv) {
 
       auto config_result = FilesystemCache::resolve_config(properties, path);
       if (config_result.ok()) {
-        storage_options = milvus_storage::iceberg::ToStorageOptions(config_result.ValueOrDie());
+        auto options_result = milvus_storage::iceberg::ToWriterOptions(config_result.ValueOrDie());
+        if (!options_result.ok()) {
+          std::cerr << options_result.status().ToString() << std::endl;
+          return 1;
+        }
+        storage_options = std::move(options_result).ValueOrDie();
         // Convert Milvus URI to standard format for iceberg-rust
         auto parsed = StorageUri::Parse(path);
         if (parsed.ok() && !parsed->scheme.empty()) {
@@ -285,7 +290,13 @@ static int DoDemoTable(int argc, char** argv) {
     }
 
     bool with_deletes = !deletes.empty();
-    auto info = milvus_storage::iceberg::CreateTestTable(table_path, rows, with_deletes, deletes, storage_options);
+    auto info_result =
+        milvus_storage::iceberg::CreateTestTable(table_path, rows, with_deletes, deletes, storage_options);
+    if (!info_result.ok()) {
+      std::cerr << info_result.status().ToString() << std::endl;
+      return 1;
+    }
+    auto info = std::move(info_result).ValueOrDie();
 
     std::cout << "Created iceberg table:" << std::endl;
     std::cout << "  path:              " << table_path << std::endl;
@@ -365,6 +376,7 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreParquetOrVortex(const 
 
 static arrow::Result<std::vector<ColumnGroupFile>> ExploreLance(const std::string& source,
                                                                 const Properties& properties) {
+  ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, source));
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, source));
 
   std::string resolved_dir = source;
@@ -374,14 +386,13 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreLance(const std::strin
   }
 
   ARROW_ASSIGN_OR_RAISE(auto lance_base_uri, milvus_storage::lance::BuildLanceBaseUri(fs_config, resolved_dir));
-  auto storage_options = milvus_storage::lance::ToStorageOptions(fs_config);
-
-  auto dataset = milvus_storage::lance::BlockingDataset::Open(lance_base_uri, storage_options);
-  auto fragment_ids = dataset->GetAllFragmentIds();
+  ARROW_ASSIGN_OR_RAISE(auto dataset, milvus_storage::lance::BlockingDataset::Open(
+                                          lance_base_uri, fs, milvus_storage::lance::ToReaderOptions(fs_config)));
+  ARROW_ASSIGN_OR_RAISE(auto fragment_ids, dataset->GetAllFragmentIds());
 
   std::vector<ColumnGroupFile> files;
   for (auto frag_id : fragment_ids) {
-    auto row_count = dataset->GetFragmentRowCount(frag_id);
+    ARROW_ASSIGN_OR_RAISE(auto row_count, dataset->GetFragmentRowCount(frag_id));
     files.emplace_back(
         ColumnGroupFile{milvus_storage::lance::MakeLanceUri(
                             milvus_storage::lance::ToMilvusLanceUri(lance_base_uri, fs_config.address), frag_id),
@@ -394,16 +405,20 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreLance(const std::strin
 
 static arrow::Result<std::vector<ColumnGroupFile>> ExploreIceberg(const std::string& source,
                                                                   const Properties& properties) {
+  ARROW_ASSIGN_OR_RAISE(auto filesystem, FilesystemCache::getInstance().get(properties, source));
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, source));
-  auto storage_options = milvus_storage::iceberg::ToStorageOptions(fs_config);
+  auto read_options = milvus_storage::iceberg::ToReaderOptions(fs_config);
 
   ARROW_ASSIGN_OR_RAISE(auto snapshot_id, GetValue<int64_t>(properties, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID));
 
-  // Convert Milvus URI to standard format for iceberg-rust
-  ARROW_ASSIGN_OR_RAISE(auto parsed_uri, StorageUri::Parse(source));
-  ARROW_ASSIGN_OR_RAISE(auto iceberg_uri, StorageUri::Make(parsed_uri, false));
+  auto iceberg_uri = source;
+  if (fs_config.storage_type != "local") {
+    ARROW_ASSIGN_OR_RAISE(auto parsed_uri, StorageUri::Parse(source));
+    ARROW_ASSIGN_OR_RAISE(iceberg_uri, StorageUri::Make(parsed_uri, false));
+  }
 
-  auto file_infos = milvus_storage::iceberg::PlanFiles(iceberg_uri, snapshot_id, storage_options);
+  ARROW_ASSIGN_OR_RAISE(auto file_infos,
+                        milvus_storage::iceberg::PlanFiles(iceberg_uri, snapshot_id, filesystem, read_options));
 
   std::vector<ColumnGroupFile> files;
   files.reserve(file_infos.size());

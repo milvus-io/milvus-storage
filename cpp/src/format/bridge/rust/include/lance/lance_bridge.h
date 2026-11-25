@@ -16,16 +16,21 @@
 
 #include <memory>
 #include <string>
-#include <vector>
 #include <unordered_map>
-#include <stdexcept>
+#include <vector>
 #include <arrow/c/abi.h>
+#include <arrow/record_batch.h>
 #include <arrow/result.h>
+#include <arrow/status.h>
 
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
 
 namespace milvus_storage::lance {
+
+namespace internal {
+std::shared_ptr<arrow::RecordBatchReader> WrapLanceRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner);
+}  // namespace internal
 
 /// Replace the global Lance tokio runtime with a new one using the specified number of worker threads.
 ///
@@ -38,11 +43,6 @@ namespace milvus_storage::lance {
 ///
 /// Violating any of the above leads to undefined behavior (use-after-free, data races).
 void ReplaceLanceRuntime(uint32_t num_threads);
-
-class LanceException : public std::runtime_error {
-  public:
-  explicit LanceException(const std::string& message) : std::runtime_error(message) {}
-};
 
 class BlockingFragmentReader;
 class BlockingScanner;
@@ -91,24 +91,27 @@ class FragmentFilesMetadata {
 
 class BlockingDataset {
   public:
-  static std::shared_ptr<BlockingDataset> Open(const std::string& uri,
-                                               const StorageOptions& storage_options = {},
-                                               uint64_t version = 0 /* 0 means latest snapshot */);
+  static arrow::Result<std::shared_ptr<BlockingDataset>> Open(const std::string& uri,
+                                                              const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+                                                              const StorageOptions& read_options,
+                                                              uint64_t version = 0 /* 0 means latest snapshot */);
 
-  static uint64_t ResolveLatestVersion(const std::string& uri, const StorageOptions& storage_options = {});
+  static arrow::Result<uint64_t> ResolveLatestVersion(const std::string& uri,
+                                                      const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+                                                      const StorageOptions& read_options);
 
-  static std::unique_ptr<BlockingDataset> OpenUnique(const std::string& uri,
-                                                     const StorageOptions& storage_options = {});
+  static arrow::Result<std::vector<uint64_t>> WriteDataset(
+      const std::string& uri,
+      struct ArrowArrayStream* stream,
+      const StorageOptions& storage_options = {},
+      LanceDataStorageFormat format = LanceDataStorageFormat::Stable,
+      bool enable_stable_row_ids = false);
 
-  static std::unique_ptr<BlockingDataset> WriteDataset(const std::string& uri,
-                                                       struct ArrowArrayStream* stream,
-                                                       const StorageOptions& storage_options = {},
-                                                       LanceDataStorageFormat format = LanceDataStorageFormat::Stable,
-                                                       bool enable_stable_row_ids = false);
+  static arrow::Status DeleteRows(const std::string& uri,
+                                  const std::string& predicate,
+                                  const StorageOptions& native_options = {});
 
   explicit BlockingDataset(rust::Box<ffi::BlockingDataset> impl) : impl_(std::move(impl)) {}
-
-  void WriteArrowArrayStream(struct ArrowArrayStream* stream);
 
   BlockingDataset(BlockingDataset&&) noexcept = default;
   BlockingDataset& operator=(BlockingDataset&&) noexcept = default;
@@ -116,34 +119,32 @@ class BlockingDataset {
   BlockingDataset(const BlockingDataset&) = delete;
   BlockingDataset& operator=(const BlockingDataset&) = delete;
 
-  void DeleteRows(const std::string& predicate);
-
   [[nodiscard]] uint64_t Version() const;
 
-  std::vector<uint64_t> GetAllFragmentIds() const;
+  arrow::Result<std::vector<uint64_t>> GetAllFragmentIds() const;
 
-  std::vector<uint64_t> GetFragmentDeletionPositions(uint64_t fragment_id) const;
+  arrow::Result<std::vector<uint64_t>> GetFragmentDeletionPositions(uint64_t fragment_id) const;
 
-  uint64_t GetFragmentPhysicalRowCount(uint64_t fragment_id) const;
+  arrow::Result<uint64_t> GetFragmentPhysicalRowCount(uint64_t fragment_id) const;
 
-  uint64_t GetFragmentRowCount(uint64_t fragment_id) const;
+  arrow::Result<uint64_t> GetFragmentRowCount(uint64_t fragment_id) const;
 
   // Lance 7 exposes the current dataset schema through FileFragment::schema().
   // It can include evolved nullable columns that are not physically stored in this fragment.
-  void GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const;
+  arrow::Status GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const;
 
   // Dataset-level scan: create a scanner for projected columns
-  std::unique_ptr<BlockingScanner> Scan(ArrowSchema& schema, uint32_t batch_size);
+  arrow::Result<std::unique_ptr<BlockingScanner>> Scan(ArrowSchema& schema, uint32_t batch_size);
 
   // Dataset-level take: random access by global row indices
-  ArrowArrayStream Take(const std::vector<int64_t>& indices, ArrowSchema& schema);
+  arrow::Result<ArrowArrayStream> Take(const std::vector<int64_t>& indices, ArrowSchema& schema);
 
 #ifdef BUILD_GTEST
   /// Test-only instrumentation for Lance's ObjectStore counters.
   ///
   /// With a shared ScanScheduler, reads are charged to the ObjectStore captured
   /// from the dataset that created the scheduler. This is not per-dataset accounting.
-  LanceIOStats IOStatsIncremental();
+  arrow::Result<LanceIOStats> IOStatsIncremental();
 #endif  // BUILD_GTEST
 
   const ffi::BlockingDataset& Impl() const { return *impl_; }
@@ -154,10 +155,10 @@ class BlockingDataset {
 
 class BlockingFragmentReader {
   public:
-  static std::unique_ptr<BlockingFragmentReader> Open(const BlockingDataset& dataset,
-                                                      uint64_t fragment_id,
-                                                      ArrowSchema& schema,
-                                                      const FragmentFilesMetadata* metadata = nullptr);
+  static arrow::Result<std::unique_ptr<BlockingFragmentReader>> Open(const BlockingDataset& dataset,
+                                                                     uint64_t fragment_id,
+                                                                     ArrowSchema& schema,
+                                                                     const FragmentFilesMetadata* metadata = nullptr);
 
   explicit BlockingFragmentReader(rust::Box<ffi::BlockingFragmentReader> impl) : impl_(std::move(impl)) {}
 
@@ -167,20 +168,22 @@ class BlockingFragmentReader {
   BlockingFragmentReader(const BlockingFragmentReader&) = delete;
   BlockingFragmentReader& operator=(const BlockingFragmentReader&) = delete;
 
-  uint64_t RowCount() const;
+  arrow::Result<uint64_t> RowCount() const;
 
   // Reuse retained footers, deletion state and row IDs across projections.
   std::shared_ptr<const FragmentFilesMetadata> GetFilesMetadata() const;
   arrow::Result<std::vector<uint64_t>> EstimateFragmentColumnMemory() const;
   arrow::Result<uint64_t> EstimateFragmentMemory() const;
 
-  void TakeAsSingleBatch(const std::vector<int64_t>& indices, ArrowArray& out_array);
+  arrow::Status TakeAsSingleBatch(const std::vector<int64_t>& indices, ArrowArray& out_array);
 
-  ArrowArrayStream TakeAsStream(const std::vector<int64_t>& indices, uint32_t batch_size);
+  arrow::Result<ArrowArrayStream> TakeAsStream(const std::vector<int64_t>& indices, uint32_t batch_size);
 
-  ArrowArrayStream ReadAllAsStream(uint32_t batch_size);
+  arrow::Result<ArrowArrayStream> ReadAllAsStream(uint32_t batch_size);
 
-  ArrowArrayStream ReadRangesAsStream(uint32_t row_range_start, uint32_t row_range_end, uint32_t batch_size);
+  arrow::Result<ArrowArrayStream> ReadRangesAsStream(uint32_t row_range_start,
+                                                     uint32_t row_range_end,
+                                                     uint32_t batch_size);
 
   private:
   rust::Box<ffi::BlockingFragmentReader> impl_;
@@ -196,9 +199,9 @@ class BlockingScanner {
   BlockingScanner(const BlockingScanner&) = delete;
   BlockingScanner& operator=(const BlockingScanner&) = delete;
 
-  uint64_t CountRows() const;
+  arrow::Result<uint64_t> CountRows() const;
 
-  ArrowArrayStream OpenStream();
+  arrow::Result<ArrowArrayStream> OpenStream();
 
   private:
   rust::Box<ffi::BlockingScanner> impl_;

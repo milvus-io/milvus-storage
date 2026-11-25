@@ -10,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "paimon_bridge.h"
+#include "paimon/paimon_bridge.h"
 
 #include <cerrno>
 #include <string_view>
@@ -21,8 +21,9 @@
 #include <arrow/type.h>
 #include <arrow/util/io_util.h>
 
-#include "bridge_util.h"
+#include "runtime/bridge_util.h"
 #include "milvus-storage/common/extend_status.h"
+#include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
 
@@ -53,17 +54,9 @@ std::string StripMarker(std::string_view message, std::string_view marker) {
   return result.empty() ? "Unknown Paimon error" : result;
 }
 
-template <typename T, typename Fn>
-arrow::Result<T> CatchRustResult(Fn&& fn) {
-  try {
-    return fn();
-  } catch (const rust::cxxbridge1::Error& error) {
-    return MakePaimonBridgeErrorStatus(error.what());
-  }
-}
-
 arrow::Status TranslatePaimonStreamStatus(arrow::Status status) {
-  if (status.ok() || status.message().find(kPaimonErrorMarker) == std::string_view::npos) {
+  if (status.ok() || (status.message().find(kPaimonErrorMarker) == std::string_view::npos &&
+                      status.message().find(kFFIErrorCodeMarker) == std::string_view::npos)) {
     return status;
   }
   return MakePaimonBridgeErrorStatus(status.message());
@@ -110,6 +103,9 @@ class PaimonStreamReader final : public arrow::RecordBatchReader {
 }  // namespace
 
 arrow::Status MakePaimonBridgeErrorStatus(std::string_view message) {
+  if (message.find(kFFIErrorCodeMarker) != std::string_view::npos) {
+    return MakeBridgeErrorStatus(message);
+  }
   if (message.find(kInvalidMarker) != std::string_view::npos) {
     return arrow::Status::Invalid(StripMarker(message, kInvalidMarker));
   }
@@ -141,13 +137,18 @@ std::shared_ptr<arrow::RecordBatchReader> WrapPaimonRecordBatchReader(std::share
 arrow::Result<std::vector<PaimonFileInfo>> PlanFiles(const std::string& table_location,
                                                      int64_t snapshot_id,
                                                      const std::string& scan_mode,
-                                                     const StorageOptions& storage_options) {
-  return CatchRustResult<std::vector<PaimonFileInfo>>([&]() {
+                                                     const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+                                                     const StorageOptions& read_options) {
+  if (!filesystem) {
+    return arrow::Status::Invalid("PlanFiles requires a non-null filesystem");
+  }
+  return CatchRustResult<std::vector<PaimonFileInfo>>(MakePaimonBridgeErrorStatus, [&]() {
     rust::Vec<rust::String> keys;
     rust::Vec<rust::String> values;
-    ConvertStorageOptions(storage_options, keys, values);
-    auto planned = ffi::paimon_plan_files(rust::Str(table_location), snapshot_id, rust::Str(scan_mode), std::move(keys),
-                                          std::move(values));
+    ConvertStorageOptions(read_options, keys, values);
+    auto lease = std::make_shared<FileSystemWrapper>(filesystem);
+    auto planned = ffi::paimon_plan_files(std::move(lease), rust::Str(table_location), snapshot_id,
+                                          rust::Str(scan_mode), std::move(keys), std::move(values));
     std::vector<PaimonFileInfo> result;
     result.reserve(planned.size());
     for (const auto& info : planned) {
@@ -158,16 +159,23 @@ arrow::Result<std::vector<PaimonFileInfo>> PlanFiles(const std::string& table_lo
 }
 
 arrow::Result<std::vector<uint64_t>> ReadDeletionVector(const std::string& path,
+                                                        const std::string& data_file_path,
                                                         uint64_t offset,
                                                         uint64_t length,
                                                         int64_t expected_cardinality,
-                                                        const StorageOptions& storage_options) {
-  return CatchRustResult<std::vector<uint64_t>>([&]() {
+                                                        const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+                                                        const StorageOptions& read_options) {
+  if (!filesystem) {
+    return arrow::Status::Invalid("ReadDeletionVector requires a non-null filesystem");
+  }
+  return CatchRustResult<std::vector<uint64_t>>(MakePaimonBridgeErrorStatus, [&]() {
     rust::Vec<rust::String> keys;
     rust::Vec<rust::String> values;
-    ConvertStorageOptions(storage_options, keys, values);
-    auto positions = ffi::paimon_read_deletion_vector(rust::Str(path), offset, length, expected_cardinality,
-                                                      std::move(keys), std::move(values));
+    ConvertStorageOptions(read_options, keys, values);
+    auto lease = std::make_shared<FileSystemWrapper>(filesystem);
+    auto positions =
+        ffi::paimon_read_deletion_vector(std::move(lease), rust::Str(path), rust::Str(data_file_path), offset, length,
+                                         expected_cardinality, std::move(keys), std::move(values));
     return std::vector<uint64_t>(positions.begin(), positions.end());
   });
 }
@@ -179,7 +187,7 @@ arrow::Result<PaimonTestTableInfo> CreateTestTableInfo(const std::string& table_
                                                        const StorageOptions& storage_options,
                                                        const std::string& file_format,
                                                        uint32_t dimension) {
-  return CatchRustResult<PaimonTestTableInfo>([&]() {
+  return CatchRustResult<PaimonTestTableInfo>(MakePaimonBridgeErrorStatus, [&]() {
     rust::Vec<int64_t> positions;
     positions.reserve(deleted_positions.size());
     for (auto position : deleted_positions) {
@@ -212,13 +220,19 @@ arrow::Result<int64_t> CreateTestTable(const std::string& table_location,
 arrow::Result<std::shared_ptr<BlockingPaimonDataSplitReader>> BlockingPaimonDataSplitReader::Open(
     const std::string& metadata_json,
     const std::string& expected_table_location,
-    const StorageOptions& storage_options) {
-  return CatchRustResult<std::shared_ptr<BlockingPaimonDataSplitReader>>([&]() {
+    const std::shared_ptr<arrow::fs::FileSystem>& filesystem,
+    const StorageOptions& read_options) {
+  if (!filesystem) {
+    return arrow::Status::Invalid("Open requires a non-null filesystem");
+  }
+  return CatchRustResult<std::shared_ptr<BlockingPaimonDataSplitReader>>(MakePaimonBridgeErrorStatus, [&]() {
     rust::Vec<rust::String> keys;
     rust::Vec<rust::String> values;
-    ConvertStorageOptions(storage_options, keys, values);
-    return std::make_shared<BlockingPaimonDataSplitReader>(ffi::paimon_open_data_split_reader(
-        rust::Str(metadata_json), rust::Str(expected_table_location), std::move(keys), std::move(values)));
+    ConvertStorageOptions(read_options, keys, values);
+    auto lease = std::make_shared<FileSystemWrapper>(filesystem);
+    return std::make_shared<BlockingPaimonDataSplitReader>(
+        ffi::paimon_open_data_split_reader(std::move(lease), rust::Str(metadata_json),
+                                           rust::Str(expected_table_location), std::move(keys), std::move(values)));
   });
 }
 
@@ -226,17 +240,13 @@ arrow::Status BlockingPaimonDataSplitReader::ExportSchema(ArrowSchema* schema) c
   if (schema == nullptr) {
     return arrow::Status::Invalid("cannot export Paimon schema into a null pointer");
   }
-  try {
-    impl_->export_schema(reinterpret_cast<uint8_t*>(schema));
-    return arrow::Status::OK();
-  } catch (const rust::cxxbridge1::Error& error) {
-    return MakePaimonBridgeErrorStatus(error.what());
-  }
+  return CatchRustStatus(MakePaimonBridgeErrorStatus,
+                         [&]() { impl_->export_schema(reinterpret_cast<uint8_t*>(schema)); });
 }
 
 arrow::Result<ArrowArrayStream> BlockingPaimonDataSplitReader::OpenStream(
     const std::vector<std::string>& projected_columns) const {
-  return CatchRustResult<ArrowArrayStream>([&]() {
+  return CatchRustResult<ArrowArrayStream>(MakePaimonBridgeErrorStatus, [&]() {
     rust::Vec<rust::String> columns;
     columns.reserve(projected_columns.size());
     for (const auto& column : projected_columns) {

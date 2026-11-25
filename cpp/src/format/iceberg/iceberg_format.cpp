@@ -17,24 +17,28 @@
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/filesystem/fs.h"
-#include "iceberg_bridge.h"
+#include "iceberg/iceberg_bridge.h"
 
 namespace milvus_storage {
 
 arrow::Result<std::vector<api::ColumnGroupFile>> IcebergFormat::explore(const std::string& explore_dir,
                                                                         const api::Properties& properties) {
+  ARROW_ASSIGN_OR_RAISE(auto filesystem, FilesystemCache::getInstance().get(properties, explore_dir));
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, explore_dir.c_str()));
-  auto storage_options = iceberg::ToStorageOptions(fs_config);
+  auto read_options = iceberg::ToReaderOptions(fs_config);
 
   ARROW_ASSIGN_OR_RAISE(auto snapshot_id, api::GetValue<int64_t>(properties, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID));
 
-  // Convert Milvus URI (scheme://address/bucket/path) to scheme://bucket/path.
-  // For S3 this is the final format; for Azure ABFSS, the Rust bridge further
-  // expands it to container@account.dfs.endpoint format that opendal requires.
-  ARROW_ASSIGN_OR_RAISE(auto parsed_uri, StorageUri::Parse(explore_dir));
-  ARROW_ASSIGN_OR_RAISE(auto iceberg_uri, StorageUri::Make(parsed_uri, false));
+  // Convert remote Milvus URI (scheme://address/bucket/path) to
+  // scheme://bucket/path. Local absolute paths are already in the form
+  // accepted by the filesystem-backed Iceberg adapter.
+  auto iceberg_uri = explore_dir;
+  if (fs_config.storage_type != "local") {
+    ARROW_ASSIGN_OR_RAISE(auto parsed_uri, StorageUri::Parse(explore_dir));
+    ARROW_ASSIGN_OR_RAISE(iceberg_uri, StorageUri::Make(parsed_uri, false));
+  }
 
-  auto file_infos = iceberg::PlanFiles(iceberg_uri, snapshot_id, storage_options);
+  ARROW_ASSIGN_OR_RAISE(auto file_infos, iceberg::PlanFiles(iceberg_uri, snapshot_id, filesystem, read_options));
 
   std::vector<api::ColumnGroupFile> files;
   files.reserve(file_infos.size());

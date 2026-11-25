@@ -168,6 +168,34 @@ TEST_F(IcebergFormatReaderTest, PositionalDeleteGetChunk) {
   }
 }
 
+TEST_F(IcebergFormatReaderTest, PositionalDeleteMatchesAzureAliasesWithRecordedEndpoint) {
+  WriteDataFile(10);
+
+  const auto metadata = MakeDeleteMetadataJson(delete_file_path_).at(kPropertyMetadata);
+  const std::vector<uint8_t> delete_metadata(metadata.begin(), metadata.end());
+  const std::vector<int64_t> expected_ids = {0, 1, 3, 4, 6, 7, 9};
+
+  for (const auto* scheme : {"azure", "wasb", "wasbs"}) {
+    SCOPED_TRACE(scheme);
+    const std::string recorded_data_uri =
+        std::string(scheme) + "://container@account.blob.core.windows.net/table/data.parquet";
+    const std::string milvus_data_uri =
+        std::string(scheme) + "://account.blob.core.windows.net/container/table/data.parquet";
+    WritePositionalDeleteFile(recorded_data_uri, {2, 5, 8});
+
+    IcebergFormatReader reader(fs_, data_file_path_, milvus_data_uri, delete_metadata, properties_, {"id"}, nullptr);
+    ASSERT_STATUS_OK(reader.open());
+    ASSERT_AND_ASSIGN(auto batch, reader.get_chunk(0));
+    ASSERT_EQ(batch->num_rows(), static_cast<int64_t>(expected_ids.size()));
+
+    auto id_array = std::dynamic_pointer_cast<arrow::Int64Array>(batch->column(0));
+    ASSERT_NE(id_array, nullptr);
+    for (size_t i = 0; i < expected_ids.size(); ++i) {
+      EXPECT_EQ(id_array->Value(i), expected_ids[i]) << "Mismatch at index " << i;
+    }
+  }
+}
+
 TEST_F(IcebergFormatReaderTest, PartialDeletesScaleRowGroupMemorySizes) {
   WriteDataFile(10);
 

@@ -455,13 +455,13 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
     REGISTER_PROPERTY(
         PROPERTY_FS_LANCE_IO_PARALLELISM,
         PropertyType::UINT32,
-        "Maximum number of concurrent I/O requests used by a shared Lance scheduler for one ObjectStore and "
-        "credential domain. The valid range is 0 through 256, inclusive, and the default is 64. Set to 0 to "
-        "disable cross-dataset shared scheduling and retain Lance's existing per-dataset behavior. The value is "
-        "captured when a shared scheduler is created; readers reusing an active scheduler do not change its "
-        "parallelism. It applies only to the storage reader's Lance v2 fragment-read path and does not cover "
-        "dataset open or manifest I/O, writers, legacy or base_id file reads, or direct Lance Dataset scan/take "
-        "operations. If LANCE_IO_THREADS is set, Lance uses that value instead.",
+        "Maximum number of concurrent I/O requests used by the shared Lance scheduler for one cached filesystem. "
+        "The valid range is 0 through 256, inclusive, and the default is 64. Set to 0 to use Lance's default of 64; "
+        "this does not disable shared scheduling. The value is captured when the first active scheduler for a "
+        "filesystem is created; later local or remote readers reusing that scheduler do not change its parallelism. "
+        "It applies only to the storage reader's Lance v2 fragment-read path and does not cover dataset open or "
+        "manifest I/O, writers, legacy or base_id file reads, or direct Lance Dataset scan/take operations. If "
+        "LANCE_IO_THREADS is set, Lance uses that value instead.",
         uint32_t(64),
         ValidatePropertyType() + ValidatePropertyRange<uint32_t>(0, 256)),
     REGISTER_PROPERTY(PROPERTY_FS_IOPS_INITIAL_RATE,

@@ -29,8 +29,12 @@ inline constexpr char kDataSplitReadPath[] = "data-split";
 
 arrow::Result<std::unordered_map<std::string, std::string>> ToStorageOptions(const ArrowFileSystemConfig& config);
 
+// Convert a Milvus URI with a percent-encoded key to Paimon's raw path form.
+// file: inputs are encoded URIs; plain local paths are left unchanged.
 std::string ToStandardUri(const std::string& milvus_uri);
 
+// Paimon paths contain literal partition escapes, not URI-encoded keys.
+// Encode remote keys once; an empty address produces scheme:///bucket/key.
 std::string ToMilvusUri(const std::string& standard_uri, const std::string& address);
 
 }  // namespace milvus_storage::paimon

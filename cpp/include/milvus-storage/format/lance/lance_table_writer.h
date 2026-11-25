@@ -25,7 +25,7 @@
 #include "milvus-storage/format/format_writer.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
-#include "lance_bridge.h"  // from cpp/src/format/lance/lance-bridge/src/include
+#include "lance/lance_bridge.h"  // from cpp/src/format/bridge/rust/include/lance
 
 namespace milvus_storage::lance {
 
@@ -57,8 +57,6 @@ class LanceTableWriter final : public FormatWriter {
   LanceDataStorageFormat data_storage_format_;
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> record_batches_;
-  std::unique_ptr<BlockingDataset> dataset_;
-  std::vector<uint64_t> origin_fids_;
   int64_t written_rows_ = 0;
 };
 }  // namespace milvus_storage::lance

@@ -14,13 +14,36 @@
 
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 
-#include <cstdlib>
-#include <fmt/format.h>
+#include <filesystem>
 #include <folly/json/json.h>
-#include "milvus-storage/common/log.h"
 
 namespace milvus_storage::iceberg {
 
+// Production planning receives an already-resolved C++ filesystem. Keep these
+// options credential-free: Rust uses them only to bind Iceberg URIs to that
+// filesystem's local root or remote bucket/container.
+std::unordered_map<std::string, std::string> ToReaderOptions(const ArrowFileSystemConfig& config) {
+  std::unordered_map<std::string, std::string> options;
+  const bool is_local = config.storage_type == "local";
+  options["milvus_fs_is_local"] = is_local ? "true" : "false";
+  if (is_local) {
+    // Use one normalized absolute root for every metadata, manifest, and data
+    // path check performed by the Rust URI binding.
+    auto root = std::filesystem::path(config.root_path);
+    if (root.is_relative()) {
+      root = std::filesystem::absolute(root);
+    }
+    options["milvus_fs_root_path"] = root.lexically_normal().string();
+  } else {
+    // The C++ filesystem is already scoped to this bucket/container. Rust
+    // verifies the authority before stripping it to a relative filesystem key.
+    options["milvus_fs_bucket"] = config.bucket_name;
+  }
+  return options;
+}
+
+// Convert provider-standard Iceberg paths to the external URI form consumed by
+// C++ filesystem resolution.
 std::string ToMilvusUri(const std::string& standard_uri, const std::string& address) {
   if (address.empty()) {
     return standard_uri;
@@ -29,6 +52,8 @@ std::string ToMilvusUri(const std::string& standard_uri, const std::string& addr
   if (!parsed.ok() || parsed->scheme.empty()) {
     return standard_uri;
   }
+  // Reattach the configured filesystem address so C++ readers can resolve the
+  // matching extfs entry from scheme://address/bucket/key.
   parsed->address = address;
   auto result = StorageUri::Make(parsed.ValueOrDie());
   return result.ok() ? result.ValueOrDie() : standard_uri;
@@ -43,13 +68,19 @@ std::string ConvertDeleteMetadataPaths(const std::vector<uint8_t>& json_bytes, c
   for (auto& entry : parsed) {
     auto path = entry.getDefault("path", "").asString();
     if (!path.empty()) {
+      // Delete files are opened later by C++, so expose the same external URI
+      // form used for the corresponding data file.
       entry["path"] = ToMilvusUri(path, address);
     }
   }
   return folly::toJson(parsed);
 }
 
-std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSystemConfig& config) {
+// This path is used only by CreateTestTable and related tests/benchmarks.
+// Production planning reads through the bound C++ filesystem instead. Keep the
+// native writer policy aligned with Lance: allow static AK/SK or default IAM,
+// and reject provider-specific role, broker, or impersonation flows.
+arrow::Result<std::unordered_map<std::string, std::string>> ToWriterOptions(const ArrowFileSystemConfig& config) {
   std::unordered_map<std::string, std::string> options;
   if (config.storage_type == "local") {
     return options;
@@ -67,154 +98,93 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
     if (endpoint.find("http://") == 0)
       options["allow_http"] = "true";
   };
-  auto set_credential_cache_key = [&]() { options["milvus_fs_cache_key"] = config.GetCacheKey(); };
 
+  // A non-IAM configuration is usable only when both credential values exist.
+  const bool use_ak_sk = !config.use_iam && !config.access_key_id.empty() && !config.access_key_value.empty();
+  const bool use_supported_credentials = config.use_iam || use_ak_sk;
   const auto& provider = config.cloud_provider;
-  // Bridge-private dispatch key. The Rust entry point removes it before
-  // forwarding the remaining options to Iceberg/OpenDAL.
-  options["cloud_provider"] = provider;
-  LOG_STORAGE_DEBUG_ << fmt::format(
-      "provider={}, endpoint={}, use_ssl={}, use_iam={}, has_aksk={}, role_arn={}, external_id_set={}, "
-      "gcp_target_sa={}, azure_broker_enabled={}, azure_client_id_set={}, azure_tenant_id_set={}, "
-      "azure_credential_endpoint_set={}",
-      provider, config.address, config.use_ssl, config.use_iam,
-      !config.access_key_id.empty() && !config.access_key_value.empty(),
-      config.role_arn.empty() ? "(empty)" : config.role_arn, !config.external_id.empty(),
-      config.gcp_target_service_account.empty() ? "(empty)" : config.gcp_target_service_account,
-      config.IsAzureCredentialBrokerEnabled(), !config.azure_client_id.empty(), !config.azure_tenant_id.empty(),
-      !config.azure_credential_endpoint.empty());
   if (provider == kCloudProviderAWS) {
-    if (!config.role_arn.empty()) {
-      set_credential_cache_key();
-      // AssumeRole: set ARN fields + region/endpoint; do NOT set AKSK so opendal
-      // uses the default credential chain (EC2 metadata / env vars) as base
-      // credential for the STS AssumeRole call.
-      set("s3.region", config.region);
-      set_endpoint("s3.endpoint", config.address);
-      set("client.assume-role.arn", config.role_arn);
-      set("client.assume-role.session-name", config.session_name);
-      set("client.assume-role.external-id", config.external_id);
-      if (config.load_frequency > 0) {
-        options["aws_credential_refresh_secs"] = std::to_string(config.load_frequency);
-      }
-    } else {
-      // Explicit AKSK or IAM
-      if (!config.use_iam) {
+    // role_arn selects AssumeRole, which intentionally falls through to the
+    // common NotImplemented result below.
+    if (use_supported_credentials && config.role_arn.empty()) {
+      if (use_ak_sk) {
         set("s3.access-key-id", config.access_key_id);
         set("s3.secret-access-key", config.access_key_value);
       }
       set("s3.region", config.region);
       set_endpoint("s3.endpoint", config.address);
+      return options;
     }
-  } else if (provider == kCloudProviderAzure) {
-    set("adls.account-name", config.access_key_id);
-    // Pass the endpoint suffix so the Rust bridge can reconstruct the full
-    // Azure DFS endpoint (account.dfs.suffix) from scheme://container/path URIs.
-    set("adls.endpoint-suffix", config.address);
-    if (config.IsAzureCredentialBrokerEnabled()) {
-      set_credential_cache_key();
-      set("azure_broker_endpoint", config.azure_credential_endpoint);
-      set("azure_broker_client_id", config.azure_client_id);
-      set("azure_broker_tenant_id", config.azure_tenant_id);
-      set("azure_broker_account_name", config.access_key_id);
-      set("azure_broker_region", config.region);
-      set("azure_broker_bucket", config.bucket_name);
-      options["azure_broker_duration_seconds"] = std::to_string(config.load_frequency);
-      options["azure_broker_request_timeout_ms"] = std::to_string(config.request_timeout_ms);
-    } else if (config.use_iam) {
-      auto* client_id = std::getenv("AZURE_CLIENT_ID");
-      if (client_id)
-        set("adls.client-id", client_id);
-      auto* tenant_id = std::getenv("AZURE_TENANT_ID");
-      if (tenant_id)
-        set("adls.tenant-id", tenant_id);
-    } else {
-      set("adls.account-key", config.access_key_value);
-    }
-  } else if (provider == kCloudProviderGCP) {
-    if (config.use_iam && !config.gcp_target_service_account.empty()) {
-      set_credential_cache_key();
-      // Bridge-private: the Rust bridge consumes this target before building
-      // FileIO, warms a refreshable impersonation provider inside the typed
-      // factory LRU, and reuses it while creating a fresh GCS operator for
-      // each Iceberg storage operation.
-      set("gcs.service-account", config.gcp_target_service_account);
-      if (config.load_frequency > 0) {
-        options["gcp_credential_refresh_secs"] = std::to_string(config.load_frequency);
-      }
-    }
-    // Otherwise uses default credentials (VM metadata)
-  } else if (provider == kCloudProviderAliyun) {
-    if (!config.role_arn.empty()) {
-      set_credential_cache_key();
-      // Per-tenant AssumeRoleWithOIDC. Machine identity (oidc_token_file,
-      // oidc_provider_arn) stays in process env — opendal picks it up via the
-      // env sweep inside `AliyunOssStorage::create_operator`. Do NOT emit
-      // `oss.access-key-id` / `oss.access-key-secret` on this branch:
-      // reqsign's `load_via_static` runs before `load_via_assume_role_with_oidc`,
-      // so static creds would silently bypass the OIDC path. Mirrors the
-      // Aliyun role_arn branch in `lance_common.cpp`.
-      //
-      // `oss.role-arn` / `oss.role-session-name` are bridge-private keys
-      // consumed only by `AliyunOssStorage` on the Rust side — stock
-      // iceberg-storage-opendal's `OssConfig` would drop them, which is the
-      // whole reason we route `oss://` through our own `StorageFactory`
-      // instead of `OpenDalStorageFactory::Oss`.
-      set_endpoint("oss.endpoint", config.address);
-      set("oss.region", config.region);
-      set("oss.role-arn", config.role_arn);
-      set("oss.role-session-name", config.session_name);
-      set("oss.external-id", config.external_id);
-      if (config.load_frequency > 0) {
-        options["oss_credential_refresh_secs"] = std::to_string(config.load_frequency);
-      }
-    } else {
-      // Explicit AKSK. iceberg 0.9 `OSS_*` constants in the `iceberg` crate
-      // map to these three dotted keys.
-      set("oss.access-key-id", config.access_key_id);
-      set("oss.access-key-secret", config.access_key_value);
-      set("oss.region", config.region);
-      set_endpoint("oss.endpoint", config.address);
-    }
-  } else if (provider == kCloudProviderTencent || provider == kCloudProviderHuawei) {
-    throw std::runtime_error("Unsupported cloud provider: " + provider);
-  } else {
-    throw std::runtime_error("Unknown cloud provider: " + provider);
   }
-  return options;
+  if (provider == kCloudProviderAzure) {
+    // Broker-issued SAS credentials belong to the C++ filesystem read path and
+    // are not reconstructed by the native writer.
+    if (use_supported_credentials && !config.IsAzureCredentialBrokerEnabled()) {
+      set("adls.account-name", config.access_key_id);
+      set("adls.endpoint-suffix", config.address);
+      if (use_ak_sk) {
+        set("adls.account-key", config.access_key_value);
+      }
+      return options;
+    }
+  }
+  if (provider == kCloudProviderGCP) {
+    // A target service account requests impersonation; only default IAM is
+    // supported by this native writer path.
+    if (config.use_iam && config.gcp_target_service_account.empty()) {
+      return options;
+    }
+  }
+  if (provider == kCloudProviderAliyun) {
+    // role_arn selects an Aliyun role flow and is rejected like AWS AssumeRole.
+    if (use_supported_credentials && config.role_arn.empty()) {
+      if (use_ak_sk) {
+        set("oss.access-key-id", config.access_key_id);
+        set("oss.access-key-secret", config.access_key_value);
+      }
+      set("oss.region", config.region);
+      set_endpoint("oss.endpoint", config.address);
+      return options;
+    }
+  }
+  return arrow::Status::NotImplemented("Unsupported Iceberg native writer configuration for cloud provider: ",
+                                       provider);
 }
 
+// Normalize provider and Milvus URI forms before comparing Iceberg data and
+// delete file paths.
 std::string StripAbfssEndpoint(const std::string& uri) {
-  // Only process abfss:// or abfs:// URIs
-  auto scheme_end = uri.find("://");
+  const auto scheme_end = uri.find("://");
   if (scheme_end == std::string::npos) {
     return uri;
   }
-  auto scheme = uri.substr(0, scheme_end);
-  if (scheme != "abfss" && scheme != "abfs") {
+  const auto scheme = uri.substr(0, scheme_end);
+  // Iceberg metadata may use any Azure alias supported by the bound
+  // filesystem adapter, including legacy WASB forms.
+  if (scheme != "azure" && scheme != "abfs" && scheme != "abfss" && scheme != "wasb" && scheme != "wasbs") {
     return uri;
   }
-  auto authority_start = scheme_end + 3;
+  const auto authority_start = scheme_end + 3;
   // Only look for '@' in the authority (before the first '/'), not in the path.
-  // Paths can legitimately contain '@' (e.g. abfss://container/user@org/file).
-  auto first_slash = uri.find('/', authority_start);
-  auto authority_end = (first_slash == std::string::npos) ? uri.size() : first_slash;
-  auto at_pos = uri.find('@', authority_start);
+  // Paths can legitimately contain '@' (e.g. wasbs://container/user@org/file).
+  const auto first_slash = uri.find('/', authority_start);
+  const auto authority_end = (first_slash == std::string::npos) ? uri.size() : first_slash;
+  const auto at_pos = uri.find('@', authority_start);
   if (at_pos == std::string::npos || at_pos >= authority_end) {
     return uri;  // no @ in authority
   }
-  // abfss://container@endpoint/path → abfss://container/path
+  // Preserve the recorded alias while removing its account endpoint.
   return uri.substr(0, authority_start) + uri.substr(authority_start, at_pos - authority_start) +
          uri.substr(authority_end);
 }
 
 std::string MilvusURIToIcebergURI(const std::string& uri) {
   // Two mutually exclusive cases:
-  // 1. ABFSS opendal format: abfss://container@endpoint/path → strip @endpoint
-  // 2. Milvus format:        scheme://address/bucket/path    → strip address
+  // 1. Azure recorded format: scheme://container@endpoint/path → strip @endpoint
+  // 2. Milvus format:         scheme://address/bucket/path    → strip address
   // They cannot be chained: after stripping @endpoint the result is
-  // abfss://container/path where "container" is NOT an address.
-  auto stripped = StripAbfssEndpoint(uri);
+  // scheme://container/path where "container" is NOT an address.
+  const auto stripped = StripAbfssEndpoint(uri);
   if (stripped != uri) {
     return stripped;  // case 1: had @, stripped it, done
   }

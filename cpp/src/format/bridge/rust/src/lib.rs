@@ -12,24 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod aliyun_oss_provider;
-mod aws_arn_provider;
-mod azure_sas_provider;
-mod cloud_provider_cache;
-mod gcp_impersonation;
+#[path = "filesystem/filesystem_opendal.rs"]
+mod filesystem_opendal;
+#[path = "iceberg/iceberg_opendal.rs"]
+mod iceberg_opendal;
+#[path = "iceberg/iceberg_bridgeimpl.rs"]
 mod iceberg_bridgeimpl;
+#[path = "iceberg/iceberg_testutil.rs"]
 mod iceberg_testutil;
+#[path = "lance/lance_bridgeimpl.rs"]
 mod lance_bridgeimpl;
+#[path = "lance/lance_memory_estimator.rs"]
 mod lance_memory_estimator;
+#[path = "lance/lance_object_store.rs"]
+mod lance_object_store;
+#[path = "paimon/paimon_bridgeimpl.rs"]
 mod paimon_bridgeimpl;
+#[path = "paimon/paimon_opendal.rs"]
+mod paimon_opendal;
+#[path = "paimon/paimon_split_serde.rs"]
 mod paimon_split_serde;
+#[path = "paimon/paimon_testutil.rs"]
 mod paimon_testutil;
+#[path = "vortex/predicate_parser.rs"]
 mod predicate_parser;
+#[path = "runtime/rust_runtime.rs"]
 mod rust_runtime;
+#[path = "vortex/vortex_bridgeimpl.rs"]
 mod vortex_bridgeimpl;
+#[path = "vortex/vortex_layout_strategy_v2.rs"]
 mod vortex_layout_strategy_v2;
 
+#[path = "filesystem/filesystem_c.rs"]
 mod filesystem_c;
+#[path = "filesystem/filesystem_object_store.rs"]
+mod filesystem_object_store;
 use iceberg_bridgeimpl::*;
 use iceberg_testutil::*;
 use lance_bridgeimpl::*;
@@ -76,6 +93,21 @@ pub mod rust_runtime_ffi {
 
 #[cxx::bridge(namespace = "milvus_storage::lance::ffi")]
 pub mod lance_ffi {
+    unsafe extern "C++" {
+        include!("milvus-storage/filesystem/ffi/filesystem_internal.h");
+
+        // Lance may share one ScanScheduler across datasets. The scheduler
+        // retains the ObjectStore created by the first dataset, so a
+        // reader-owned C++ filesystem holder cannot keep that ObjectStore's
+        // wrapper address valid after the originating dataset is destroyed.
+        // Pass an opaque shared lease instead, allowing the Rust ObjectStore
+        // and scheduler to retain the exact FileSystemWrapper they use.
+        // Vortex's reader-local holder is sufficient because it does not have
+        // this cross-dataset scheduler ownership path.
+        #[namespace = ""]
+        type FileSystemWrapper;
+    }
+
     /// Lance data storage format
     #[repr(u8)]
     #[derive(Debug, Clone, Copy)]
@@ -109,6 +141,7 @@ pub mod lance_ffi {
         /// Open the latest Dataset when version is zero, or the exact snapshot
         /// identified by a non-zero version.
         pub fn open_dataset(
+            filesystem: SharedPtr<FileSystemWrapper>,
             uri: &str,
             storage_options_keys: Vec<String>,
             storage_options_values: Vec<String>,
@@ -118,6 +151,7 @@ pub mod lance_ffi {
         /// This does not load or decode the manifest, construct a Dataset, or
         /// initialize a ScanScheduler.
         pub fn resolve_latest_dataset_version(
+            filesystem: SharedPtr<FileSystemWrapper>,
             uri: &str,
             storage_options_keys: Vec<String>,
             storage_options_values: Vec<String>,
@@ -129,12 +163,16 @@ pub mod lance_ffi {
             storage_options_values: Vec<String>,
             data_storage_format: LanceDataStorageFormat,
             enable_stable_row_ids: bool,
-        ) -> Result<Box<BlockingDataset>>;
+        ) -> Result<Vec<u64>>;
+        pub fn delete_rows(
+            uri: &str,
+            predicate: &str,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
+        ) -> Result<()>;
 
-        pub unsafe fn write_stream(self: &mut BlockingDataset, stream_ptr: *mut u8) -> Result<()>;
         pub fn version(self: &BlockingDataset) -> u64;
         pub fn get_all_fragment_ids(self: &BlockingDataset) -> Vec<u64>;
-        pub fn dataset_delete_rows(dataset: &mut BlockingDataset, predicate: &str) -> Result<()>;
         pub fn get_fragment_deletion_positions(
             dataset: &BlockingDataset,
             fragment_id: u64,
@@ -218,8 +256,19 @@ pub mod lance_ffi {
     }
 } // mod lance_ffi
 
+// FileSystemWrapper is immutable after construction. Its shared Arrow
+// filesystem is already used concurrently by C++ format readers.
+unsafe impl Send for lance_ffi::FileSystemWrapper {}
+unsafe impl Sync for lance_ffi::FileSystemWrapper {}
+
 #[cxx::bridge(namespace = "milvus_storage::paimon::ffi")]
 pub mod paimon_ffi {
+    unsafe extern "C++" {
+        #[namespace = ""]
+        #[cxx_name = "FileSystemWrapper"]
+        type PaimonFileSystemWrapper = crate::lance_ffi::FileSystemWrapper;
+    }
+
     /// A single physical file or atomic DataSplit returned by Paimon planning.
     struct PaimonFileInfo {
         path: String,
@@ -231,6 +280,7 @@ pub mod paimon_ffi {
         type BlockingPaimonDataSplitReader;
 
         fn paimon_plan_files(
+            filesystem: SharedPtr<PaimonFileSystemWrapper>,
             table_location: &str,
             snapshot_id: i64,
             scan_mode: &str,
@@ -239,7 +289,9 @@ pub mod paimon_ffi {
         ) -> Result<Vec<PaimonFileInfo>>;
 
         fn paimon_read_deletion_vector(
+            filesystem: SharedPtr<PaimonFileSystemWrapper>,
             path: &str,
+            data_file_path: &str,
             offset: u64,
             length: u64,
             expected_cardinality: i64,
@@ -248,6 +300,7 @@ pub mod paimon_ffi {
         ) -> Result<Vec<u64>>;
 
         fn paimon_open_data_split_reader(
+            filesystem: SharedPtr<PaimonFileSystemWrapper>,
             metadata_json: &str,
             expected_table_location: &str,
             storage_options_keys: Vec<String>,
@@ -465,6 +518,12 @@ pub mod vortex_ffi {
 
 #[cxx::bridge(namespace = "milvus_storage::iceberg::ffi")]
 pub mod iceberg_ffi {
+    unsafe extern "C++" {
+        #[namespace = ""]
+        #[cxx_name = "FileSystemWrapper"]
+        type IcebergFileSystemWrapper = crate::lance_ffi::FileSystemWrapper;
+    }
+
     /// Per-file info returned from plan_files.
     struct IcebergFileInfo {
         /// Absolute data file URI from Iceberg metadata
@@ -486,10 +545,11 @@ pub mod iceberg_ffi {
         /// which handles snapshot resolution, delete file association,
         /// sequence number filtering, and partition matching.
         fn iceberg_plan_files(
+            filesystem: SharedPtr<IcebergFileSystemWrapper>,
             metadata_location: &str,
             snapshot_id: i64,
-            storage_options_keys: Vec<String>,
-            storage_options_values: Vec<String>,
+            read_option_keys: Vec<String>,
+            read_option_values: Vec<String>,
         ) -> Result<Vec<IcebergFileInfo>>;
     }
 }
