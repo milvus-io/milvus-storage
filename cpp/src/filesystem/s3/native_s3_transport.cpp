@@ -13,6 +13,8 @@
 #include <aws/common/uri.h>
 #include <aws/s3/s3_client.h>
 #include <aws/s3-crt/S3CrtErrorMarshaller.h>
+#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/gcp/gcp_credential_provider.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/util_internal.h"
 
@@ -21,6 +23,7 @@ struct NativeS3Transport::State {
   std::mutex mutex;
   size_t inflight = 0;
   size_t limit = 0;
+  bool gcp_bearer = false;
   std::shared_ptr<S3ClientHolder> holder;
 
   void Retire(bool network_pending) {
@@ -226,6 +229,10 @@ arrow::Result<std::shared_ptr<NativeS3Transport>> NativeS3Transport::Make(
   if (!lease->GetUnderlyingS3Client())
     return arrow::Status::Invalid("SDK CRT client has no underlying native client");
   auto state = std::make_shared<State>();
+  if (options.cloud_provider == kCloudProviderGCP) {
+    const auto provider = std::dynamic_pointer_cast<GcpCredentialProvider>(lease->GetCredentialsProvider());
+    state->gcp_bearer = provider && provider->GetAWSCredentials().IsEmpty();
+  }
   state->holder = std::move(holder);
   state->limit = options.max_connections;
   return std::shared_ptr<NativeS3Transport>(new NativeS3Transport(std::move(state), std::move(crt_holder)));
@@ -267,6 +274,10 @@ arrow::Future<Aws::Client::XmlOutcome> NativeS3Transport::Send(const Aws::Amazon
     r->response = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("native-s3-response", r->http);
     for (const auto& h : model.GetHeaders()) r->http->SetHeaderValue(h.first, h.second);
     for (const auto& h : model.GetAdditionalCustomHeaders()) r->http->SetHeaderValue(h.first, h.second);
+    if (state_->gcp_bearer) {
+      const auto provider = std::static_pointer_cast<GcpCredentialProvider>(r->client_lease->GetCredentialsProvider());
+      ARROW_RETURN_NOT_OK(provider->AuthorizeScopedRequest(r->http, /*bearer=*/true).status());
+    }
     r->message = r->http->ToCrtHttpRequest();
     // The SDK conversion uses an absolute URI and drops '/' for bucket roots.
     // Direct CRT requests need an origin-form target, especially for virtual

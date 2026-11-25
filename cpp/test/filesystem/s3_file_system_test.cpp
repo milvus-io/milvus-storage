@@ -234,7 +234,7 @@ class S3RequestTimeoutTest : public S3UnitTest {
   protected:
   static arrow::Result<S3Options> CreateOptions(const ArrowFileSystemConfig& config) {
     if (config.cloud_provider == kCloudProviderGCP) {
-      return GcpFileSystemProducer(config).CreateS3Options(false);
+      return GcpFileSystemProducer(config).CreateS3Options();
     }
     return S3FileSystemProducer(config).CreateS3Options();
   }

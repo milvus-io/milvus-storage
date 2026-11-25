@@ -13,255 +13,16 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/gcp/gcp_filesystem_producer.h"
-#include "filesystem/gcp/gcp_filesystem_producer_internal.h"
-
-#include <cstdlib>
-#include <exception>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <stdexcept>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <utility>
-
-#include <aws/core/Aws.h>
-#include <aws/core/http/HttpClient.h>
-#include <aws/core/http/HttpClientFactory.h>
-#include <aws/core/http/curl/CurlHttpClient.h>
-#include <aws/core/http/standard/StandardHttpRequest.h>
-#include <aws/core/http/standard/StandardHttpResponse.h>
 
 #include <arrow/filesystem/filesystem.h>
-#include <arrow/status.h>
-#include <fmt/format.h>
-
 #include "milvus-storage/common/constants.h"
-#include "milvus-storage/common/log.h"
-#include "milvus-storage/common/macro.h"
 #include "milvus-storage/filesystem/gcp/gcp_credential_provider.h"
-#include "milvus-storage/filesystem/gcp/gcp_credential_registry.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
-#include "milvus-storage/filesystem/s3/s3_global.h"
-#include "milvus-storage/filesystem/tls_http_client.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 
 namespace milvus_storage {
 
-namespace {
-
-constexpr const char* kGoogleClientFactoryAllocationTag = "GoogleHttpClientFactory";
-
-const std::unordered_map<std::string, S3LogLevel> kLogLevelMap = {
-    {"off", S3LogLevel::Off},   {"fatal", S3LogLevel::Fatal}, {"error", S3LogLevel::Error}, {"warn", S3LogLevel::Warn},
-    {"info", S3LogLevel::Info}, {"debug", S3LogLevel::Debug}, {"trace", S3LogLevel::Trace}};
-
-// Stateless HttpClient wrapper. Holds only a reference to the registry and an
-// optional TLS floor setting. Per-request credential work is dispatched by URI
-// lookup in MakeRequest (for GOOG4 re-signing on conditional writes).
-class GoogleHttpClientDelegator : public Aws::Http::HttpClient {
-  public:
-  GoogleHttpClientDelegator(const Aws::Client::ClientConfiguration& config, const std::string& tls_min_version) {
-    if (!tls_min_version.empty()) {
-      underlying_client_ =
-          Aws::MakeShared<TlsCurlHttpClient>(kGoogleClientFactoryAllocationTag, config, tls_min_version);
-    } else {
-      underlying_client_ = Aws::MakeShared<Aws::Http::CurlHttpClient>(kGoogleClientFactoryAllocationTag, config);
-    }
-  }
-
-  std::shared_ptr<Aws::Http::HttpResponse> MakeRequest(
-      const std::shared_ptr<Aws::Http::HttpRequest>& request,
-      Aws::Utils::RateLimits::RateLimiterInterface* readLimiter = nullptr,
-      Aws::Utils::RateLimits::RateLimiterInterface* writeLimiter = nullptr) const override {
-    auto provider = GcpCredentialRegistry::Instance().Lookup(request->GetUri());
-    if (!provider) {
-      // Invariant: exactly one cloud provider per process. If the GCP factory
-      // is installed, every S3-SDK request should match a registered
-      // (endpoint, bucket). A miss here indicates either a URI normalization
-      // bug in the registry or a request that escaped RegisterIdentity(). Fail
-      // fast so the bug surfaces clearly instead of a puzzling server 403.
-      return MakeSignatureErrorResponse(request, fmt::format("No GcpCredentialProvider registered for URI: {}",
-                                                             std::string(request->GetUri().GetURIString().c_str())));
-    }
-    auto status = provider->MaybeSignConditionalWrite(request);
-    if (!status.ok()) {
-      return MakeSignatureErrorResponse(request, status.message());
-    }
-    return underlying_client_->MakeRequest(request, readLimiter, writeLimiter);
-  }
-
-  private:
-  // Build a standard AWS XML error so the SDK's ErrorMarshaller parses it
-  // correctly and surfaces a usable message at the call site.
-  static std::shared_ptr<Aws::Http::HttpResponse> MakeSignatureErrorResponse(
-      const std::shared_ptr<Aws::Http::HttpRequest>& request, const std::string& message) {
-    auto error_response =
-        Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>(kGoogleClientFactoryAllocationTag, request);
-    error_response->SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
-    error_response->GetResponseBody() << fmt::format(
-        R"(<?xml version="1.0" encoding="UTF-8"?>
-<Error>
-  <Code>SignatureFailed</Code>
-  <Message>{}</Message>
-</Error>)",
-        message);
-    return error_response;
-  }
-
-  std::shared_ptr<Aws::Http::HttpClient> underlying_client_;
-};
-
-// Stateless HttpClientFactory. Dispatches Authorization header injection by
-// URI lookup against GcpCredentialRegistry. Identity itself lives in the
-// registry, not in the factory — that's what allows N identities per process.
-// Log each untrusted endpoint once; the gate runs on every request.
-void WarnUntrustedEndpointOnce(const Aws::Http::URI& uri) {
-  static std::mutex mu;
-  static std::unordered_set<std::string> warned;
-  std::string endpoint = std::string(uri.GetAuthority().c_str()) + ":" + std::to_string(uri.GetPort());
-  {
-    std::lock_guard<std::mutex> lock(mu);
-    if (!warned.insert(endpoint).second) {
-      return;
-    }
-  }
-  LOG_STORAGE_WARNING_ << "GoogleHttpClientFactory: not sending GCP credentials to untrusted endpoint " << endpoint
-                       << " (only HTTPS *.googleapis.com and operator-configured endpoints)";
-}
-
-class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
-  public:
-  explicit GoogleHttpClientFactory(std::string tls_min_version) : tls_min_version_(std::move(tls_min_version)) {}
-
-  [[nodiscard]] std::shared_ptr<Aws::Http::HttpClient> CreateHttpClient(
-      const Aws::Client::ClientConfiguration& config) const override {
-    return Aws::MakeShared<GoogleHttpClientDelegator>(kGoogleClientFactoryAllocationTag, config, tls_min_version_);
-  }
-
-  [[nodiscard]] std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(
-      const Aws::String& uri, Aws::Http::HttpMethod method, const Aws::IOStreamFactory& streamFactory) const override {
-    return CreateHttpRequest(Aws::Http::URI(uri), method, streamFactory);
-  }
-
-  [[nodiscard]] std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(
-      const Aws::Http::URI& uri,
-      Aws::Http::HttpMethod method,
-      const Aws::IOStreamFactory& streamFactory) const override {
-    auto request =
-        Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(kGoogleClientFactoryAllocationTag, uri, method);
-    request->SetResponseStreamFactory(streamFactory);
-
-    // S3CrtClient also calls this factory before handing the request to its
-    // native transport, so IAM Bearer headers reach CRT reads here.
-    auto& registry = GcpCredentialRegistry::Instance();
-    auto provider = registry.Lookup(uri);
-    if (!provider) {
-      // Same invariant as Delegator::MakeRequest: every GCP URI should have a
-      // registered provider. This interface can only return a request (no error
-      // channel), so log here; the SDK delegator or GCS will reject it.
-      LOG_STORAGE_ERROR_ << "GoogleHttpClientFactory: no GcpCredentialProvider registered for URI: "
-                         << std::string(uri.GetURIString().c_str());
-      return request;
-    }
-    if (!provider->IssuesBearerToken()) {
-      // HMAC: the AWS signer and the delegator's GOOG4 re-sign handle it.
-      return request;
-    }
-    // External filesystems register providers for endpoints taken from user
-    // specs. Their Bearer tokens may only go to Google APIs over HTTPS or to
-    // an endpoint the operator configured.
-    if (!registry.MayCarryBearerToken(uri)) {
-      WarnUntrustedEndpointOnce(uri);
-      return request;
-    }
-    // This runs inside the AWS SDK, which is built without exceptions, so an
-    // exception must not leave this callback.
-    std::optional<std::pair<std::string, std::string>> header;
-    try {
-      header = provider->AuthorizationHeader();
-    } catch (const std::exception& e) {
-      LOG_STORAGE_WARNING_ << "GoogleHttpClientFactory: get GCP authorization header failed: " << e.what();
-    } catch (...) {
-      LOG_STORAGE_WARNING_ << "GoogleHttpClientFactory: get GCP authorization header failed: unknown exception";
-    }
-    if (header.has_value() && !header->first.empty()) {
-      request->SetHeaderValue(header->first.c_str(), header->second.c_str());
-    }
-    return request;
-  }
-
-  private:
-  std::string tls_min_version_;
-};
-
-}  // namespace
-
-namespace gcp_internal {
-
-std::shared_ptr<Aws::Http::HttpClientFactory> MakeGoogleHttpClientFactory(std::string tls_min_version) {
-  return Aws::MakeShared<GoogleHttpClientFactory>(kGoogleClientFactoryAllocationTag, std::move(tls_min_version));
-}
-
-}  // namespace gcp_internal
-
-arrow::Status GcpFileSystemProducer::InitS3Compat(const ArrowFileSystemConfig& first_config) {
-  // FIXME: assumes no cross-cloud-provider usage in practice; if it does happen,
-  // this will produce unknown issues (InitializeS3 installs the HttpClientFactory
-  // process-globally, and whichever producer runs call_once first wins).
-  static std::once_flag s3_init_flag;
-  static arrow::Status init_status = arrow::Status::OK();
-  std::call_once(s3_init_flag, [&first_config]() {
-    S3GlobalOptions global_options;
-    auto it = kLogLevelMap.find(first_config.log_level);
-    global_options.log_level = it != kLogLevelMap.end() ? it->second : S3LogLevel::Off;
-
-    // tls_min_version only takes effect when use_ssl is enabled. The TLS floor
-    // is fixed by the first GCP Make() (the factory is installed once). This
-    // matches the pre-refactor behavior; treat it as a separate concern.
-    std::string tls_min_ver =
-        (first_config.use_ssl && !first_config.tls_min_version.empty()) ? first_config.tls_min_version : "";
-
-    Aws::HttpOptions http_options;
-    http_options.httpClientFactory_create_fn = [tls_min_ver]() {
-      return gcp_internal::MakeGoogleHttpClientFactory(tls_min_ver);
-    };
-    global_options.http_options = http_options;
-    global_options.override_default_http_options = true;
-
-    auto status = InitializeS3(global_options);
-    if (!status.ok()) {
-      // Keep the original status code and detail. Stringifying into
-      // Status::Invalid turned a credential/network init failure into a
-      // data-class error (segcore DataFormatBroken/2024) and destroyed whatever
-      // classification the cause carried.
-      init_status = arrow::Status(status.code(), "GcpFileSystemProducer failed to initialize S3: " + status.message(),
-                                  status.detail());
-      return;
-    }
-
-    // Register cleanup on exit. atexit handlers must not throw, so log on failure.
-    std::atexit([]() {
-      auto status = EnsureS3Finalized();
-      if (!status.ok()) {
-        LOG_STORAGE_ERROR_ << "GcpFileSystemProducer failed to finalize S3: " << status.ToString();
-      }
-    });
-  });
-  return init_status;
-}
-
-arrow::Result<std::shared_ptr<GcpCredentialProvider>> GcpFileSystemProducer::RegisterIdentity(
-    const ArrowFileSystemConfig& config) {
-  ARROW_ASSIGN_OR_RAISE(auto provider, BuildGcpProviderFromConfig(config));
-  GcpBucketKey key{NormalizeGcpEndpoint(config.address, config.use_ssl), config.bucket_name};
-  // Only the primary filesystem's address is operator configuration;
-  // external filesystems (alias set) take theirs from user specs.
-  ARROW_RETURN_NOT_OK(GcpCredentialRegistry::Instance().Register(std::move(key), provider, config.alias.empty()));
-  return provider;
-}
-
-arrow::Result<S3Options> GcpFileSystemProducer::CreateS3Options(bool bearer_token) {
+arrow::Result<S3Options> GcpFileSystemProducer::CreateS3Options() {
   S3Options options;
 
   // Three cases:
@@ -299,24 +60,19 @@ arrow::Result<S3Options> GcpFileSystemProducer::CreateS3Options(bool bearer_toke
                                   config_.cloud_provider);
   }
 
-  if (bearer_token) {
-    // GCP+IAM / Impersonation / Broker: the Authorization header is injected by the
-    // registry-backed HTTP factory. Use anonymous credentials so the AWS SDK's
-    // SigV4 signer does not overwrite the injected Bearer.
-    options.ConfigureAnonymousCredentials();
-  } else {
-    options.ConfigureAccessKey(config_.access_key_id, config_.access_key_value);
-  }
-
+  ARROW_ASSIGN_OR_RAISE(options.credentials_provider, BuildGcpProviderFromConfig(config_));
+  options.credentials_kind = options.credentials_provider->GetAWSCredentials().IsEmpty() ? S3CredentialsKind::Anonymous
+                                                                                         : S3CredentialsKind::Explicit;
   return options;
 }
 
 arrow::Result<ArrowFileSystemPtr> GcpFileSystemProducer::Make() {
-  ARROW_RETURN_NOT_OK(InitS3Compat(config_));
-  ARROW_ASSIGN_OR_RAISE(auto provider, RegisterIdentity(config_));
-
-  ARROW_ASSIGN_OR_RAISE(auto s3_options, CreateS3Options(provider->IssuesBearerToken()));
-  return S3FileSystem::Make(s3_options);
+  ARROW_RETURN_NOT_OK(S3FileSystemProducer(config_).InitS3());
+  ARROW_ASSIGN_OR_RAISE(auto options, CreateS3Options());
+  if (config_.alias.empty()) {
+    GcpCredentialProvider::TrustEndpoint(config_);
+  }
+  return S3FileSystem::Make(options);
 }
 
 }  // namespace milvus_storage
