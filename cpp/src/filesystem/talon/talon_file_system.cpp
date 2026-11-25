@@ -178,11 +178,12 @@ class TalonInputFile final : public arrow::io::RandomAccessFile, public NonBlock
     }
     // A lazy open may not have a size yet. The synchronous API can wait for
     // initialization before clamping and allocating on the calling thread.
-    ARROW_ASSIGN_OR_RAISE(const auto reader, EnsureReaderAsync().result());
+    const auto reader_future = EnsureReaderAsync();
+    ARROW_ASSIGN_OR_RAISE(const auto reader, reader_future.result());
     ARROW_ASSIGN_OR_RAISE(nbytes, GetReadSize(position, nbytes, reader->KnownSize()));
     ARROW_ASSIGN_OR_RAISE(auto buffer, arrow::AllocateResizableBuffer(nbytes, pool_));
-    ARROW_ASSIGN_OR_RAISE(const int64_t bytes_read,
-                          ReadAtInto(position, requested_bytes, buffer->mutable_data(), is_data_file_footer).result());
+    const auto read_future = ReadAtInto(position, requested_bytes, buffer->mutable_data(), is_data_file_footer);
+    ARROW_ASSIGN_OR_RAISE(const int64_t bytes_read, read_future.result());
     ARROW_RETURN_NOT_OK(buffer->Resize(bytes_read));
     return std::shared_ptr<arrow::Buffer>(std::move(buffer));
   }
