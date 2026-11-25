@@ -17,19 +17,11 @@
 #include <arrow/result.h>
 
 #include "milvus-storage/filesystem/fs.h"
-#include "milvus-storage/filesystem/gcp/gcp_credential_provider.h"
 #include "milvus-storage/filesystem/s3/s3_options.h"
 
 namespace milvus_storage {
 
-// GCS access through the S3-compatible XML API, using the AWS SDK S3Client.
-// Authentication is layered via a custom HttpClientFactory:
-//   - IAM mode: OAuth2 Bearer token from ComputeEngineCredentials (GCE metadata).
-//     The AWS SDK is fed anonymous credentials so it does not overwrite the
-//     injected Authorization header.
-//   - HMAC mode: GCS HMAC ak/sk with standard AWS SigV4 for non-conditional
-//     requests, and GOOG4-HMAC-SHA256 re-signing for conditional writes
-//     (x-goog-if-generation-match), which GCS does not accept via SigV4.
+// GCS XML API through a per-client GCP credentials provider.
 class GcpFileSystemProducer : public FileSystemProducer {
   public:
   explicit GcpFileSystemProducer(const ArrowFileSystemConfig& config) : config_(config) {}
@@ -37,22 +29,7 @@ class GcpFileSystemProducer : public FileSystemProducer {
   arrow::Result<ArrowFileSystemPtr> Make() override;
 
   private:
-  // One-shot: install the stateless HTTP client factory and call
-  // Aws::InitializeS3. Guarded by std::call_once; the first GCP Make() wins
-  // and determines process-global settings (TLS floor, log level). Returns
-  // the status captured the first time call_once actually ran.
-  static arrow::Status InitS3Compat(const ArrowFileSystemConfig& first_config);
-
-  // Per-Make: build a credential provider from the given config and register
-  // it in GcpCredentialRegistry under (endpoint, bucket). Must be called
-  // after InitS3Compat. Returns Status::Invalid when the config doesn't
-  // match any supported credential mode, or when the bucket already maps to
-  // another identity.
-  static arrow::Result<std::shared_ptr<GcpCredentialProvider>> RegisterIdentity(const ArrowFileSystemConfig& config);
-
-  // bearer_token: the provider injects Authorization, so the AWS signer must
-  // not sign (anonymous credentials).
-  arrow::Result<S3Options> CreateS3Options(bool bearer_token);
+  arrow::Result<S3Options> CreateS3Options();
 
   const ArrowFileSystemConfig config_;
 };

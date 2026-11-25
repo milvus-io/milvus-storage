@@ -83,6 +83,7 @@
 #include <aws/s3/model/PutObjectRequest.h>
 #include <aws/s3/model/UploadPartRequest.h>
 #ifdef WITH_CRT
+#include <aws/s3-crt/S3CrtEndpointProvider.h>
 #include <aws/s3-crt/model/GetObjectRequest.h>
 #include <aws/s3-crt/model/HeadObjectRequest.h>
 #include <aws/core/http/standard/StandardHttpResponse.h>
@@ -97,6 +98,7 @@
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
+#include "milvus-storage/filesystem/gcp/gcp_credential_provider.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/util_internal.h"
@@ -877,8 +879,10 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
   ObjectCrtInputFile(std::shared_ptr<S3CrtClientHolder> holder,
                      const arrow::io::IOContext& io_context,
                      const S3Path& path,
-                     int64_t size = kNoSize)
-      : holder_(std::move(holder)),
+                     int64_t size,
+                     bool gcp_bearer)
+      : gcp_bearer_(gcp_bearer),
+        holder_(std::move(holder)),
         io_context_(io_context),
         path_(path),
         read_state_(std::make_shared<ReadState>(size)) {}
@@ -1057,6 +1061,14 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     ctx->request.SetRange(ToAwsString(FormatRange(position, nbytes)));
     ctx->request.SetResponseStreamFactory(AwsWriteableStreamFactory(out, nbytes));
 
+    if (gcp_bearer_) {
+      auto endpoint =
+          ctx->client_lease->accessEndpointProvider()->ResolveEndpoint(ctx->request.GetEndpointContextParams());
+      ARROW_RETURN_NOT_OK(GcpCredentialProvider::AuthorizeRead(ctx->client_lease->GetCredentialsProvider(),
+                                                               ctx->request, std::move(endpoint), path_.key,
+                                                               Aws::Http::HttpMethod::HTTP_GET)
+                              .status());
+    }
     ctx->metrics->IncrementReadCount();
     ctx->client_lease->GetObjectAsync(
         ctx->request,
@@ -1277,6 +1289,7 @@ class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonB
     S3Path path;
   };
 
+  const bool gcp_bearer_;
   std::shared_ptr<S3CrtClientHolder> holder_;
   const arrow::io::IOContext io_context_;
   S3Path path_;
@@ -2406,6 +2419,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
   std::shared_ptr<S3ClientHolder> holder_;
 #ifdef WITH_CRT
   bool use_crt_async_reads_ = false;
+  bool gcp_bearer_ = false;
   ClientBuilder<Aws::S3Crt::S3CrtClient> crt_builder_;
   std::shared_ptr<S3CrtClientHolder> crt_holder_;
 #endif
@@ -2432,6 +2446,11 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
       return arrow::Status::IOError("Failed to build S3 client: ", result.status().ToString());
     }
     ARROW_RETURN_NOT_OK(std::move(result).Value(&holder_));
+    const bool is_gcp = options().cloud_provider == kCloudProviderGCP;
+    if (is_gcp) {
+      ARROW_ASSIGN_OR_RAISE(auto client, holder_->Lock());
+      GcpCredentialProvider::ConfigS3HttpClient(options(), *client.get());
+    }
 #ifdef WITH_CRT
     if (use_crt_async_reads_) {
       std::shared_ptr<FilesystemMetrics> metrics;
@@ -2444,6 +2463,10 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
         return arrow::Status::IOError("Failed to build S3 CRT client: ", crt_result.status().ToString());
       }
       ARROW_RETURN_NOT_OK(std::move(crt_result).Value(&crt_holder_));
+      if (is_gcp) {
+        ARROW_ASSIGN_OR_RAISE(auto lease, crt_holder_->Acquire());
+        gcp_bearer_ = GcpCredentialProvider::ConfigS3HttpClient(options(), *lease.operator->());
+      }
     }
 #endif
     return arrow::Status::OK();
@@ -3203,7 +3226,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
 
 #ifdef WITH_CRT
     if (use_crt_async_reads_) {
-      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path);
+      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, kNoSize, gcp_bearer_);
       ARROW_RETURN_NOT_OK(ptr->Init());
       return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
     }
@@ -3229,7 +3252,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
 
 #ifdef WITH_CRT
     if (use_crt_async_reads_) {
-      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, info.size());
+      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, info.size(), gcp_bearer_);
       ARROW_RETURN_NOT_OK(ptr->Init());
       return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
     }
