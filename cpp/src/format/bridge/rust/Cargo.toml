@@ -10,8 +10,11 @@ crate-type = ["staticlib"]
 [features]
 io-trace = []
 s3-crt-async = []
+talon = ["dep:talon", "s3-crt-async"]
 
 [dependencies]
+talon = { package = "talon-rust-client", git = "https://github.com/milvus-io/talon.git", rev = "c6ba5c97d09c2cec2d58eebec3c7d661521bb99b", optional = true }
+
 # common dependencies
 anyhow = "1.0.99"
 futures = "0.3.31"
@@ -103,13 +106,13 @@ tempfile = "3"
 cxx-build = "1.0.184"
 
 [patch.crates-io]
-lance = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
-lance-core = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
-lance-encoding = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
-lance-file = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
-lance-index = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
-lance-io = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
-lance-table = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance = { git = "https://github.com/zilliztech/lance", rev = "3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9" }
+lance-core = { git = "https://github.com/zilliztech/lance", rev = "3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9" }
+lance-encoding = { git = "https://github.com/zilliztech/lance", rev = "3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9" }
+lance-file = { git = "https://github.com/zilliztech/lance", rev = "3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9" }
+lance-index = { git = "https://github.com/zilliztech/lance", rev = "3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9" }
+lance-io = { git = "https://github.com/zilliztech/lance", rev = "3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9" }
+lance-table = { git = "https://github.com/zilliztech/lance", rev = "3f4cf5fa6ea7ca1111406845e3a54cfc8d169bb9" }
 
 [lints.rust]
 deprecated = "deny"

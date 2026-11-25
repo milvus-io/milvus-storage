@@ -4,6 +4,7 @@ use std::ffi::{CString, c_void};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "io-trace")]
 use std::time::Instant;
@@ -311,6 +312,7 @@ unsafe extern "C" {
         out_data: *mut u8,
     ) -> LoonFFIResult;
 
+    pub(crate) fn loon_filesystem_reader_control_talon(reader: *mut c_void, enable: bool) -> bool;
     pub unsafe fn loon_filesystem_reader_close(reader: *mut std::ffi::c_void) -> LoonFFIResult;
     pub unsafe fn loon_filesystem_reader_destroy(reader: *mut std::ffi::c_void);
 }
@@ -835,6 +837,7 @@ impl Drop for ReaderHandle {
 }
 
 pub struct ObjectStoreReadSourceCpp {
+    supports_async: AtomicBool,
     inner: ThreadSafePtr<std::ffi::c_void>,
     reader: Arc<ReaderHandle>,
     path: String,
@@ -882,6 +885,7 @@ impl ObjectStoreReadSourceCpp {
         };
 
         Ok(Self {
+            supports_async: AtomicBool::new(supports_async),
             inner: ThreadSafePtr::new(fs_rawptr),
             reader: Arc::new(ReaderHandle {
                 ptr: reader_raw,
@@ -892,6 +896,12 @@ impl ObjectStoreReadSourceCpp {
             coalesce_config: Some(coalesce_config),
             handle,
         })
+    }
+
+    pub(crate) fn disable_talon(&self) {
+        let supports_async =
+            unsafe { loon_filesystem_reader_control_talon(self.reader.as_ptr(), false) };
+        self.supports_async.store(supports_async, Ordering::Relaxed);
     }
 }
 
@@ -947,6 +957,8 @@ impl VortexReadAt for ObjectStoreReadSourceCpp {
         length: usize,
         alignment: vortex::buffer::Alignment,
     ) -> BoxFuture<'static, VortexResult<BufferHandle>> {
+        #[cfg(feature = "s3-crt-async")]
+        let supports_async = self.supports_async.load(Ordering::Relaxed);
         let reader = self.reader.clone();
         let handle = self.handle.clone();
 
@@ -955,7 +967,7 @@ impl VortexReadAt for ObjectStoreReadSourceCpp {
                 .map_err(|_| vortex_err!("read length does not fit in u64"))?;
 
             #[cfg(feature = "s3-crt-async")]
-            if reader.supports_async {
+            if supports_async {
                 let buffer = read_async_via_ffi(reader, offset, len, alignment).await?;
                 return Ok(BufferHandle::new_host(buffer));
             }

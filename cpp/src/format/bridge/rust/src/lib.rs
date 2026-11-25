@@ -38,6 +38,9 @@ mod paimon_testutil;
 mod predicate_parser;
 #[path = "runtime/rust_runtime.rs"]
 mod rust_runtime;
+#[cfg(feature = "talon")]
+#[path = "talon/talon_bridge.rs"]
+mod talon_bridge;
 #[path = "vortex/vortex_bridgeimpl.rs"]
 mod vortex_bridgeimpl;
 #[path = "vortex/vortex_layout_strategy_v2.rs"]

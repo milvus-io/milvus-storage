@@ -99,7 +99,7 @@ test-all: build
 	./scripts/setup_azurite.sh
 	(source ./scripts/azurite_env.sh && ./build/${build_type}/test/milvus_test)
 	(source ./scripts/azurite_env.sh && ./build/${build_type}/test/Test_FFI)
-	
+
 # Test cloud storage with all providers or a specific one
 # Usage: make test-cloud-storage     # Test all cloud providers
 #        make test-cloud-storage aws  # Test AWS only

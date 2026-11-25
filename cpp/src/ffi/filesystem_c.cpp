@@ -72,6 +72,25 @@ LoonFFIResult loon_filesystem_get(const ::LoonProperties* properties,
   RETURN_UNREACHABLE();
 }
 
+LoonFFIResult loon_filesystem_evict(const ::LoonProperties* properties, const char* path, uint32_t path_len) {
+  try {
+    if (properties == nullptr || (path == nullptr && path_len != 0)) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "properties must not be null and a non-empty path requires a pointer");
+    }
+    api::Properties properties_map;
+    const auto error = ConvertFFIProperties(properties_map, properties);
+    if (error.has_value()) {
+      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", *error, "]");
+    }
+    const std::string path_str = path_len == 0 ? std::string() : std::string(path, path_len);
+    const auto status = FilesystemCache::getInstance().evict(properties_map, path_str);
+    RETURN_ARROW_ERROR_IF(status, LOON_ARROW_ERROR, status.ToString());
+    RETURN_SUCCESS();
+  } catch (const std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+}
+
 void loon_filesystem_destroy(FileSystemHandle handle) {
   if (handle) {
     auto* wrapper = reinterpret_cast<FileSystemWrapper*>(handle);
@@ -406,6 +425,12 @@ LoonFFIResult loon_filesystem_reader_readat(FileSystemReaderHandle handle,
   }
 
   RETURN_UNREACHABLE();
+}
+
+// Internal read policy hook. The Rust owner keeps the handle alive during the transition.
+extern "C" bool loon_filesystem_reader_control_talon(FileSystemReaderHandle handle, bool enable) noexcept {
+  auto input_file = reinterpret_cast<RandomAccessFileWrapper*>(handle)->get();
+  return talon::internal::ControlTalonForFile(input_file.get(), enable);
 }
 
 LoonFFIResult loon_filesystem_reader_supports_async(FileSystemReaderHandle handle, bool* out_supported) {

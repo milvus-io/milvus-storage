@@ -103,8 +103,22 @@
     loon_writer_destroy;
     loon_free_cstr;
 
+    # Talon raw interface
+    loon_talon_client_create;
+    loon_talon_client_destroy;
+    loon_talon_read;
+    loon_talon_read_async;
+    loon_talon_stat;
+    loon_talon_stat_async;
+    loon_talon_load;
+    loon_talon_load_async;
+    loon_talon_batch_load;
+    loon_talon_batch_load_async;
+    loon_talon_result_free;
+
     # FilesystemCache interface
     loon_filesystem_get;
+    loon_filesystem_evict;
     loon_filesystem_destroy;
     loon_close_filesystems;
 
@@ -113,6 +127,9 @@
     loon_filesystem_list_metrics;
     loon_filesystem_free_metrics_list;
     loon_filesystem_reset_metrics;
+    loon_filesystem_get_metrics_sources;
+    loon_filesystem_list_metrics_sources;
+    loon_filesystem_free_metrics_sources;
 
     # Reader interface
     loon_reader_new;
@@ -230,6 +247,16 @@
     loon_fiukey_s3fs_readat_fail;
     # ColumnGroup
     loon_fiukey_column_group_write_fail;
+
+    loon_async_cancel;
+    loon_async_release;
+    loon_async_context_create;
+    loon_async_context_shutdown;
+    loon_async_context_destroy;
+    loon_errcode_async_cancelled;
+    loon_errcode_async_deadline;
+    loon_errcode_async_overloaded;
+    loon_errcode_async_busy;
 
   local:
     # Hide all other symbols

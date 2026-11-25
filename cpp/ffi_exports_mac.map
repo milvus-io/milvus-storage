@@ -101,8 +101,22 @@ _loon_writer_close
 _loon_writer_destroy
 _loon_free_cstr
 
+# Talon raw interface
+_loon_talon_client_create
+_loon_talon_client_destroy
+_loon_talon_read
+_loon_talon_read_async
+_loon_talon_stat
+_loon_talon_stat_async
+_loon_talon_load
+_loon_talon_load_async
+_loon_talon_batch_load
+_loon_talon_batch_load_async
+_loon_talon_result_free
+
 # FilesystemCache interface
 _loon_filesystem_get
+_loon_filesystem_evict
 _loon_filesystem_destroy
 _loon_close_filesystems
 
@@ -111,6 +125,9 @@ _loon_filesystem_get_metrics
 _loon_filesystem_list_metrics
 _loon_filesystem_free_metrics_list
 _loon_filesystem_reset_metrics
+_loon_filesystem_get_metrics_sources
+_loon_filesystem_list_metrics_sources
+_loon_filesystem_free_metrics_sources
 
 # Reader interface
 _loon_reader_new
@@ -228,3 +245,12 @@ _loon_fiukey_s3fs_read_fail
 _loon_fiukey_s3fs_readat_fail
 # ColumnGroup
 _loon_fiukey_column_group_write_fail
+_loon_async_cancel
+_loon_async_release
+_loon_async_context_create
+_loon_async_context_shutdown
+_loon_async_context_destroy
+_loon_errcode_async_cancelled
+_loon_errcode_async_deadline
+_loon_errcode_async_overloaded
+_loon_errcode_async_busy

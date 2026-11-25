@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -21,11 +22,14 @@
 #include <numeric>
 #include <random>
 #include <thread>
+#include <utility>
 
 #include <arrow/api.h>
 #include <arrow/extension_type.h>
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
+#include <arrow/util/base64.h>
+#include <arrow/util/io_util.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/ScopeGuard.h>
 #include <folly/executors/InlineExecutor.h>
@@ -40,6 +44,7 @@
 #include "milvus-storage/writer.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/talon/talon_file_system_producer.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/format/async_tasks.h"
 #include "milvus-storage/format/column_group_reader.h"
@@ -650,7 +655,10 @@ TEST_P(FormatReaderTest, ParquetByteTasksProgressWhileEarlierReadsArePending) {
     GTEST_SKIP() << "Test parquet only.";
   }
   ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, 0, false, 1000, 32));
-  for (auto compression : {::parquet::Compression::UNCOMPRESSED, ::parquet::Compression::ZSTD}) {
+  for (const auto& [compression, fail_first] :
+       {std::pair{::parquet::Compression::UNCOMPRESSED, false}, std::pair{::parquet::Compression::ZSTD, false},
+        std::pair{::parquet::Compression::UNCOMPRESSED, true}}) {
+    SCOPED_TRACE(fail_first);
     SCOPED_TRACE(static_cast<int>(compression));
     const auto path = base_path_ + "/async_ranges.parquet";
     auto writer_properties = ::parquet::WriterProperties::Builder().compression(compression)->build();
@@ -716,29 +724,64 @@ TEST_P(FormatReaderTest, ParquetByteTasksProgressWhileEarlierReadsArePending) {
                     GetValueNoError<uint64_t>(properties, PROPERTY_READER_ASYNC_TASK_SPLIT_SIZE_BYTES));
     ASSERT_EQ(tasks.size(), 4);
     std::vector<folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>>> futures;
+    auto failed_task = std::make_shared<folly::Baton<>>();
+    std::vector<std::weak_ptr<FormatReader>> task_readers;
     for (const auto& task : tasks) {
       ASSERT_AND_ASSIGN(auto task_reader, reader->clone_reader());
-      futures.push_back(task_reader->read_with_range_async(task.range_start, task.range_end));
+      task_readers.push_back(task_reader);
+      futures.push_back(
+          task_reader->read_with_range_async(task.range_start, task.range_end).deferValue([failed_task](auto&& result) {
+            if (!result.ok()) {
+              failed_task->post();
+            }
+            return std::move(result);
+          }));
     }
     auto result = folly::collectAll(std::move(futures)).via(&executor);
     EXPECT_TRUE(later_requested->try_wait_for(std::chrono::seconds(5)));
     EXPECT_FALSE(result.isReady());
-    second.MarkFinished();
-    EXPECT_FALSE(result.isReady());
-    first.MarkFinished();
-    auto results = std::move(result).get();
-    std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
-    for (auto& task_result : results) {
-      ASSERT_FALSE(task_result.hasException());
-      ASSERT_AND_ASSIGN(auto batch_reader, std::move(task_result.value()));
-      ASSERT_AND_ASSIGN(auto task_batches, batch_reader->ToRecordBatches());
-      batches.insert(batches.end(), task_batches.begin(), task_batches.end());
+    if (fail_first) {
+      // Each clone owns a separate lazy row-group read. Release the last format
+      // reader while the first two ranges are held by the test filesystem.
+      reader.reset();
+      for (const auto& task_reader : task_readers) {
+        EXPECT_TRUE(task_reader.expired());
+      }
+      first.MarkFinished(arrow::Status::IOError("injected row-group read failure"));
+      EXPECT_TRUE(failed_task->try_wait_for(std::chrono::seconds(5)));
+      EXPECT_FALSE(second.is_finished());
+      EXPECT_FALSE(result.isReady());
+      second.MarkFinished();
+    } else {
+      second.MarkFinished();
+      EXPECT_FALSE(result.isReady());
+      first.MarkFinished();
     }
-    ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatches(batches));
-    ASSERT_AND_ASSIGN(auto actual, table->CombineChunksToBatch());
-    ASSERT_EQ(actual->num_rows(), 998);
-    ASSERT_EQ(actual->num_columns(), 1);
-    EXPECT_TRUE(actual->column(0)->Equals(*batch->GetColumnByName("vector")->Slice(1, 998)));
+    auto results = std::move(result).get();
+    ASSERT_EQ(results.size(), tasks.size());
+    size_t failures = 0;
+    int64_t rows_read = 0;
+    size_t index = 0;
+    for (auto& task_result : results) {
+      const auto& task = tasks[index++];
+      ASSERT_FALSE(task_result.hasException());
+      auto read = std::move(task_result.value());
+      if (!read.ok()) {
+        ASSERT_TRUE(fail_first) << read.status().ToString();
+        EXPECT_NE(read.status().ToString().find("injected row-group read failure"), std::string::npos);
+        ++failures;
+        continue;
+      }
+      ASSERT_AND_ASSIGN(auto table, (*read)->ToTable());
+      ASSERT_EQ(table->num_columns(), 1);
+      rows_read += table->num_rows();
+      EXPECT_TRUE(table->column(0)->Equals(arrow::ChunkedArray(
+          batch->GetColumnByName("vector")->Slice(task.range_start, task.range_end - task.range_start))));
+    }
+    EXPECT_EQ(failures, static_cast<size_t>(fail_first));
+    if (!fail_first) {
+      EXPECT_EQ(rows_read, 998);
+    }
     EXPECT_EQ(reads->load(), 4);
   }
 }
@@ -912,6 +955,198 @@ TEST_P(FormatReaderTest, CreateAsyncDefersPlainFormatOpen) {
   ASSERT_NE(reader->get_schema(), nullptr);
   EXPECT_EQ(reader->get_schema()->num_fields(), schema_->num_fields());
   EXPECT_GT(executor.add_count(), 0);
+}
+
+TEST_P(FormatReaderTest, TalonStreamSwitchesToOriginAfterOpen) {
+  const auto& format = GetParam();
+  if (format != LOON_FORMAT_PARQUET && format != LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Requires Parquet or Vortex.";
+  }
+
+  ASSERT_AND_ASSIGN(auto dir, arrow::internal::TemporaryDir::Make("loon-talon-footer-"));
+  const auto root = dir->path().ToString();
+  api::Properties properties;
+  ASSERT_EQ(SetValue(properties, PROPERTY_FS_STORAGE_TYPE, "local"), std::nullopt);
+  ASSERT_EQ(SetValue(properties, PROPERTY_FS_ROOT_PATH, root.c_str()), std::nullopt);
+  ASSERT_AND_ASSIGN(auto root_fs, GetFileSystem(properties));
+  const auto root_observable = std::dynamic_pointer_cast<Observable>(root_fs);
+  ASSERT_NE(root_observable, nullptr);
+  ASSERT_AND_ASSIGN(auto root_metrics, root_observable->GetMetrics(kOriginMetricsSource));
+  ASSERT_NE(root_metrics, nullptr);
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderAWS;
+  config.bucket_name = "test-bucket";
+  config.talon_mode = TalonMode::Full;
+  // The unreachable coordinator makes Talon fall back to the real local origin.
+  // Its attempt counter still distinguishes footer routing from origin-only reads.
+  config.talon_coordinator = "127.0.0.1:0";
+
+  const auto bucket_root = root + "/" + config.bucket_name;
+  ASSERT_EQ(SetValue(properties, PROPERTY_FS_ROOT_PATH, bucket_root.c_str()), std::nullopt);
+  ASSERT_AND_ASSIGN(auto origin, GetFileSystem(properties));
+  ASSERT_STATUS_OK(CreateTestDir(origin, "test"));
+  // Vortex's footer read spans at least 64 KiB, and it can cache covered data.
+  // Use enough random IDs that a scan of the first row must issue an actual read.
+  constexpr std::array<bool, 4> kIdOnly{true, false, false, false};
+  ASSERT_AND_ASSIGN(auto read_schema, CreateTestSchema(kIdOnly));
+  ASSERT_AND_ASSIGN(auto batch, CreateTestData(read_schema, /*start_offset=*/0, /*randdata=*/true,
+                                               /*num_rows=*/16384, 0, 0, kIdOnly));
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, read_schema));
+  auto writer = Writer::create("test", read_schema, std::move(policy), properties);
+  ASSERT_STATUS_OK(writer->write(batch));
+  ASSERT_AND_ASSIGN(auto groups, writer->close());
+  ASSERT_EQ(groups->size(), 1);
+  ASSERT_EQ(groups->front()->files.size(), 1);
+  const auto& file = groups->front()->files.front();
+  const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
+  const auto footer_size = file.Get<uint64_t>(api::kPropertyFooterSize);
+  ASSERT_GT(file_size, 96 * 1024);
+  ASSERT_GT(footer_size, 0);
+  ASSERT_AND_ASSIGN(auto uri, StorageUri::Parse(file.path));
+
+  const std::vector<std::string> columns{"id"};
+  folly::CPUThreadPoolExecutor executor{2};
+  for (const bool talon_open_only : {false, true}) {
+    SCOPED_TRACE(talon_open_only);
+    config.talon_open_only = talon_open_only;
+    ASSERT_AND_ASSIGN(auto talon_fs, TalonFileSystemProducer(config, root_fs).Make());
+    auto read_fs = std::make_shared<FileSystemProxy>(config.bucket_name, std::move(talon_fs));
+    ASSERT_AND_ASSIGN(auto metrics, read_fs->GetMetrics(kTalonMetricsSource));
+    ASSERT_NE(metrics, nullptr);
+    for (const bool async : {false, true}) {
+      SCOPED_TRACE(async);
+      std::shared_ptr<FormatReader> reader;
+      if (format == LOON_FORMAT_PARQUET) {
+        reader = std::make_shared<parquet::ParquetFormatReader>(read_fs, uri.key, properties, columns, KeyRetriever{},
+                                                                file_size, footer_size);
+      } else {
+        reader = std::make_shared<vortex::VortexFormatReader>(read_fs, read_schema, uri.key, properties, columns,
+                                                              file_size, footer_size);
+      }
+      const auto before_open = metrics->GetReadCount();
+      const auto status = async ? reader->open_async().via(&executor).get() : reader->open();
+      ASSERT_STATUS_OK(status);
+      const auto after_open = metrics->GetReadCount();
+      ASSERT_EQ(after_open, before_open + 1);
+
+      const auto origin_before_read = root_metrics->GetReadCount();
+      if (format == LOON_FORMAT_VORTEX) {
+        // Take uses the original small-window stream. Range reads below open a
+        // large-window view from the same filesystem and cached footer.
+        ASSERT_AND_ASSIGN(auto first, reader->take_async({0}).via(&executor).get());
+        ASSERT_EQ(first->num_rows(), 1);
+        EXPECT_TRUE(first->column(0)->Equals(arrow::ChunkedArray(batch->column(0)->Slice(0, 1))));
+        EXPECT_EQ(metrics->GetReadCount() == after_open, talon_open_only);
+        EXPECT_GT(root_metrics->GetReadCount(), origin_before_read);
+      }
+      const auto before_range = metrics->GetReadCount();
+      const auto count = batch->num_rows();
+      ASSERT_AND_ASSIGN(auto batches, async ? reader->read_with_range_async(0, count).via(&executor).get()
+                                            : reader->read_with_range(0, count));
+      ASSERT_AND_ASSIGN(auto data, batches->ToTable());
+      ASSERT_EQ(data->num_columns(), 1);
+      EXPECT_TRUE(data->column(0)->Equals(arrow::ChunkedArray(batch->column(0))));
+      EXPECT_EQ(metrics->GetReadCount() == before_range, talon_open_only);
+      EXPECT_GT(root_metrics->GetReadCount(), origin_before_read);
+    }
+  }
+}
+
+TEST_P(FormatReaderTest, TalonFilesystemSuppliesFooterOnly) {
+  const auto& format = GetParam();
+  if (!IsTalonEnv() || (format != LOON_FORMAT_PARQUET && format != LOON_FORMAT_VORTEX)) {
+    GTEST_SKIP() << "Requires Talon with Parquet or Vortex.";
+  }
+  for (const bool encrypted : {false, true}) {
+    if (encrypted && format != LOON_FORMAT_PARQUET) {
+      continue;
+    }
+    SCOPED_TRACE(encrypted);
+    auto reader_properties = properties_;
+    reader_properties[PROPERTY_FS_TALON_OPEN_ONLY] = true;
+    const auto encoded_key = arrow::util::base64_encode(std::string(16, 'k'));
+    KeyRetriever key_retriever;
+    if (encrypted) {
+      SetValue(reader_properties, PROPERTY_WRITER_ENC_ENABLE, "true");
+      SetValue(reader_properties, PROPERTY_WRITER_ENC_KEY, encoded_key.c_str());
+      SetValue(reader_properties, PROPERTY_WRITER_ENC_META, "key-id");
+      key_retriever = [encoded_key](const std::string&) { return encoded_key; };
+    }
+    ASSERT_AND_ASSIGN(auto reader_fs, GetFileSystem(reader_properties));
+    const auto observable = std::dynamic_pointer_cast<Observable>(reader_fs);
+    ASSERT_NE(observable, nullptr);
+    ASSERT_AND_ASSIGN(auto talon_metrics, observable->GetMetrics(kTalonMetricsSource));
+    ASSERT_NE(talon_metrics, nullptr);
+    ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+    auto writer = Writer::create(base_path_, schema_, std::move(policy), reader_properties);
+    ASSERT_STATUS_OK(writer->write(test_batch_));
+    ASSERT_AND_ASSIGN(auto groups, writer->close());
+    ASSERT_EQ(groups->size(), 1);
+    ASSERT_EQ(groups->front()->files.size(), 1);
+    const auto& file = groups->front()->files.front();
+    const std::vector<std::string> columns{"id"};
+    const auto read_schema = arrow::schema({schema_->field(0)});
+    folly::CPUThreadPoolExecutor executor{2};
+    auto verify_data = [&](const std::shared_ptr<FormatReader>& reader, bool async = false) {
+      const auto talon_before_read = talon_metrics->GetReadCount();
+      const auto count = test_batch_->num_rows();
+      ASSERT_AND_ASSIGN(auto batches, async ? reader->read_with_range_async(0, count).via(&executor).get()
+                                            : reader->read_with_range(0, count));
+      ASSERT_AND_ASSIGN(auto table, batches->ToTable());
+      ASSERT_EQ(table->num_columns(), 1);
+      EXPECT_TRUE(table->column(0)->Equals(arrow::ChunkedArray(test_batch_->column(0))));
+      EXPECT_EQ(talon_metrics->GetReadCount(), talon_before_read);
+    };
+
+    auto talon_before_open = talon_metrics->GetReadCount();
+    ASSERT_AND_ASSIGN(auto reader,
+                      FormatReader::create(read_schema, format, file, reader_properties, columns, key_retriever));
+    EXPECT_GT(talon_metrics->GetReadCount(), talon_before_open);
+    ASSERT_NO_FATAL_FAILURE(verify_data(reader));
+    talon_before_open = talon_metrics->GetReadCount();
+    ASSERT_AND_ASSIGN(auto clone, reader->clone_reader());
+    EXPECT_EQ(talon_metrics->GetReadCount() > talon_before_open, encrypted);
+    ASSERT_NO_FATAL_FAILURE(verify_data(clone));
+
+    talon_before_open = talon_metrics->GetReadCount();
+    ASSERT_AND_ASSIGN(auto async_reader,
+                      FormatReader::create_async(read_schema, format, file, reader_properties, columns, key_retriever)
+                          .via(&executor)
+                          .get());
+    EXPECT_GT(talon_metrics->GetReadCount(), talon_before_open);
+    ASSERT_NO_FATAL_FAILURE(verify_data(async_reader, !encrypted));
+
+    auto verify_cached_data = [&]<typename ReaderT>() {
+      talon_before_open = talon_metrics->GetReadCount();
+      ASSERT_AND_ASSIGN(auto sync_metadata,
+                        FormatReader::load_metadata<ReaderT>(file, reader_properties, key_retriever));
+      EXPECT_GT(talon_metrics->GetReadCount(), talon_before_open);
+      talon_before_open = talon_metrics->GetReadCount();
+      ASSERT_AND_ASSIGN(
+          auto async_metadata,
+          ReaderT::MetaTrait::load_metadata_async(file, reader_properties, key_retriever).via(&executor).get());
+
+      EXPECT_GT(talon_metrics->GetReadCount(), talon_before_open);
+      talon_before_open = talon_metrics->GetReadCount();
+      ASSERT_AND_ASSIGN(auto cached,
+                        FormatReader::create_from_metadata<ReaderT>(sync_metadata, file, read_schema, columns, ""));
+      EXPECT_EQ(talon_metrics->GetReadCount() > talon_before_open, encrypted);
+      ASSERT_NO_FATAL_FAILURE(verify_data(cached));
+      talon_before_open = talon_metrics->GetReadCount();
+      ASSERT_AND_ASSIGN(auto async_cached,
+                        ReaderT::MetaTrait::create_from_metadata_async(async_metadata, file, read_schema, columns, "")
+                            .via(&executor)
+                            .get());
+      EXPECT_EQ(talon_metrics->GetReadCount() > talon_before_open, encrypted);
+      ASSERT_NO_FATAL_FAILURE(verify_data(async_cached, !encrypted));
+    };
+    if (format == LOON_FORMAT_PARQUET) {
+      ASSERT_NO_FATAL_FAILURE(verify_cached_data.template operator()<parquet::ParquetFormatReader>());
+    } else {
+      ASSERT_NO_FATAL_FAILURE(verify_cached_data.template operator()<vortex::VortexFormatReader>());
+    }
+  }
 }
 
 TEST_P(FormatReaderTest, ParquetLoadMetadataAsyncUsesCallerExecutor) {
@@ -1141,47 +1376,43 @@ TEST_P(FormatReaderTest, S3FilesystemReaderFailureShouldPropagate) {
 }
 #endif
 
-TEST_P(FormatReaderTest, ParquetReadWithRangeReaderOutlivesFormatReader) {
+TEST_P(FormatReaderTest, ReadWithRangeReaderOutlivesFormatReader) {
   std::string format = GetParam();
-  if (format != LOON_FORMAT_PARQUET) {
-    GTEST_SKIP() << "Test parquet only.";
+  if (format == LOON_FORMAT_LANCE_TABLE && IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
   }
 
-  auto parquet_writer_props = ::parquet::WriterProperties::Builder()
-                                  .compression(::parquet::Compression::ZSTD)
-                                  ->enable_dictionary()
-                                  ->enable_statistics()
-                                  ->build();
+  // The range reader must keep its backend state alive for every format, not
+  // only Parquet.
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto column_groups, writer->close());
+  ASSERT_FALSE(column_groups->empty());
+  ASSERT_FALSE(column_groups->at(0)->files.empty());
+  ASSERT_AND_ASSIGN(auto id_schema, CreateTestSchema(std::array<bool, 4>{true, false, false, false}));
 
-  const auto file_path = base_path_ + "/range_outlives_reader.parquet";
-  ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(file_path));
-  ASSERT_AND_ASSIGN(auto parquet_writer, ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(),
-                                                                            sink, parquet_writer_props));
-  ASSERT_STATUS_OK(parquet_writer->NewBufferedRowGroup());
-  ASSERT_STATUS_OK(parquet_writer->WriteRecordBatch(*test_batch_));
-  ASSERT_STATUS_OK(parquet_writer->Close());
-  ASSERT_STATUS_OK(sink->Close());
-
-  std::shared_ptr<arrow::RecordBatchReader> rb_reader;
-  {
-    std::shared_ptr<FormatReader> format_reader;
-    ASSERT_AND_ASSIGN(format_reader, FormatReader::create(
-                                         schema_, LOON_FORMAT_PARQUET,
-                                         api::ColumnGroupFile{
-                                             .path = file_path, .start_index = 0, .end_index = test_batch_->num_rows()},
-                                         properties_, std::vector<std::string>{"id"}, nullptr));
-    ASSERT_AND_ASSIGN(rb_reader, format_reader->read_with_range(1, 4));
+  folly::CPUThreadPoolExecutor executor(1);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(id_schema, format, column_groups->at(0)->files[0], properties_,
+                                                        std::vector<std::string>{"id"}, nullptr));
+    std::weak_ptr<FormatReader> weak_reader = reader;
+    std::shared_ptr<arrow::RecordBatchReader> batches;
+    if (async) {
+      auto future = reader->read_with_range_async(1, 4).via(&executor);
+      reader.reset();
+      ASSERT_AND_ASSIGN(batches, std::move(future).get());
+    } else {
+      ASSERT_AND_ASSIGN(batches, reader->read_with_range(1, 4));
+      reader.reset();
+    }
+    ASSERT_TRUE(weak_reader.expired());
+    ASSERT_AND_ASSIGN(auto table, batches->ToTable());
+    ASSERT_EQ(table->num_columns(), 1);
+    ASSERT_EQ(table->num_rows(), 3);
+    EXPECT_TRUE(table->column(0)->Equals(arrow::ChunkedArray(test_batch_->column(0)->Slice(1, 3))));
   }
-
-  ASSERT_AND_ASSIGN(auto rbs, rb_reader->ToRecordBatches());
-  ASSERT_AND_ASSIGN(auto rb, arrow::ConcatenateRecordBatches(rbs));
-  ASSERT_EQ(3, rb->num_rows());
-  ASSERT_EQ(1, rb->num_columns());
-  auto id_array = std::dynamic_pointer_cast<arrow::Int64Array>(rb->column(0));
-  ASSERT_NE(nullptr, id_array);
-  EXPECT_EQ(1, id_array->Value(0));
-  EXPECT_EQ(2, id_array->Value(1));
-  EXPECT_EQ(3, id_array->Value(2));
 }
 
 TEST_P(FormatReaderTest, ParquetCreateFromMetadataReappliesProjection) {

@@ -46,11 +46,20 @@ extern FFI_EXPORT const int loon_errcode_transient_service = LOON_TRANSIENT_SERV
 extern FFI_EXPORT const int loon_errcode_txn_exhausted_retry = LOON_TXN_EXHAUSTED_RETRY;
 extern FFI_EXPORT const int loon_errcode_txn_resolution_failed = LOON_TXN_RESOLUTION_FAILED;
 
+extern FFI_EXPORT const int loon_errcode_async_cancelled = LOON_ASYNC_CANCELLED;
+extern FFI_EXPORT const int loon_errcode_async_deadline = LOON_ASYNC_DEADLINE;
+extern FFI_EXPORT const int loon_errcode_async_overloaded = LOON_ASYNC_OVERLOADED;
+extern FFI_EXPORT const int loon_errcode_async_busy = LOON_ASYNC_BUSY;
+
 }  // extern "C"
 
 std::string error_to_string(int code) {
   static const std::unordered_map<int, std::string> error_strings = {
       {LOON_SUCCESS, "Success"},
+      {LOON_ASYNC_CANCELLED, "Async cancelled"},
+      {LOON_ASYNC_DEADLINE, "Async deadline"},
+      {LOON_ASYNC_OVERLOADED, "Async overloaded"},
+      {LOON_ASYNC_BUSY, "Async busy"},
       {LOON_INVALID_ARGS, "Invalid args"},
       {LOON_MEMORY_ERROR, "Memory allocation failed"},
       {LOON_ARROW_ERROR, "Internal error"},

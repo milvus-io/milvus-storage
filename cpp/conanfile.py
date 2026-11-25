@@ -247,15 +247,17 @@ class StorageConan(ConanFile):
             tc.variables["MSVC_LANGUAGE_VERSION"] = cxx_std_value
             tc.variables["MSVC_ENABLE_ALL_WARNINGS"] = False
             tc.variables["MSVC_USE_STATIC_RUNTIME"] = "MT" in msvc_runtime_flag(self)
-        tc.variables["WITH_ASAN"] = self.options.with_asan
+        # These options are switched in a reused build directory, so they must
+        # override values cached by a prior configure.
+        tc.cache_variables["WITH_ASAN"] = self.options.with_asan
         tc.variables["WITH_PROFILER"] = self.options.with_profiler
-        tc.variables["WITH_UT"] = self.options.with_ut
-        tc.variables["WITH_BENCHMARK"] = self.options.with_benchmark
+        tc.cache_variables["WITH_UT"] = self.options.with_ut
+        tc.cache_variables["WITH_BENCHMARK"] = self.options.with_benchmark
         tc.variables["ARROW_WITH_JEMALLOC"] = self.options.with_jemalloc
         tc.variables["WITH_JNI"] = self.options.with_jni
         tc.variables["WITH_PYTHON_BINDING"] = self.options.with_python_binding
         tc.variables["WITH_FIU"] = self.options.with_fiu
-        tc.variables["WITH_CRT"] = self.options.with_crt
+        tc.cache_variables["WITH_CRT"] = self.options.with_crt
 
         # Set JAVA_HOME for JNI compilation
         if self.options.with_jni:

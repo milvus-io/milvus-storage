@@ -22,7 +22,7 @@ corrosion_set_env_vars(rust_bridge
 # otherwise, `rlib` will conflict.
 corrosion_add_cxxbridge(rust-bridge
     CRATE rust_bridge
-    FILES lib.rs)
+    FILES lib.rs talon/talon_bridge.rs)
 
 target_include_directories(rust-bridge PUBLIC ${Arrow_INCLUDE_DIRS}
     ${CMAKE_CURRENT_BINARY_DIR}/corrosion_generated/cxxbridge/rust-bridge/include

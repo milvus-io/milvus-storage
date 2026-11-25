@@ -33,6 +33,7 @@
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/filesystem/observable.h"
+#include "milvus-storage/filesystem/talon/talon_file_system.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
 #include "milvus-storage/properties.h"
@@ -88,12 +89,13 @@ class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
     return conditional->OpenConditionalOutputStream(full_path, std::move(metadata));
   }
 
-  std::shared_ptr<FilesystemMetrics> GetMetrics() const override {
+  arrow::Result<std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>> GetMetricsSources()
+      const override {
     auto observable = std::dynamic_pointer_cast<Observable>(base_fs());
     if (!observable) {
-      return nullptr;
+      return std::unordered_map<std::string, std::shared_ptr<FilesystemMetrics>>{};
     }
-    return observable->GetMetrics();
+    return observable->GetMetricsSources();
   }
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(
@@ -265,6 +267,18 @@ struct ArrowFileSystemConfig {
   uint32_t iops_initial_rate = 2000;
   uint32_t iops_max_rate = 5000;
 
+  // Remote read routing: disabled, full, or small_reads.
+  TalonMode talon_mode = TalonMode::Disabled;
+  // Immutable read policy. Data boundaries disable Talon on individual files;
+  // unrestricted files ignore that transition. Ignored when Talon is disabled.
+  bool talon_open_only = false;
+  // Inclusive limit in bytes for small_reads, applied before EOF clamping.
+  uint32_t talon_small_read_threshold = 512U * 1024U;
+  std::string talon_coordinator = "";
+  uint32_t talon_block_size = 256U * 1024U * 1024U;
+  // Maximum idle TCP connections per peer in each Talon pool; does not cap active connections.
+  uint32_t talon_max_idle_per_addr = 256;
+
   // Alias for external filesystem identification (e.g., "prod", "backup")
   // Empty for default filesystem
   std::string alias = "";
@@ -352,6 +366,13 @@ class FilesystemCache {
                                                                            const std::string& path = "");
 
   /**
+   * @brief Evict the filesystem selected by the same properties/path as get().
+   * A cache miss succeeds without creating a filesystem. Existing holders remain
+   * valid; subsequent get() calls create a new instance with fresh metadata.
+   */
+  [[nodiscard]] arrow::Status evict(const api::Properties& properties, const std::string& path = "");
+
+  /**
    * @brief Get the size of cached filesystems
    */
   [[nodiscard]] size_t size() const;
@@ -395,8 +416,10 @@ class FilesystemCache {
    *
    * Local format: `file://{root_path}#{cache_key}`.
    * Remote format: `{address}/{bucket_name}#{cache_key}`. An empty remote
-   * address is rendered as `<null>`. `cache_key` is the existing internal LRU
-   * key returned by ArrowFileSystemConfig::GetCacheKey().
+   * address is rendered as `<null>`.
+   * Talon format: `{address}/{bucket_name}?talon={coordinator}#{cache_key}`.
+   * `cache_key` is the existing internal LRU key returned by
+   * ArrowFileSystemConfig::GetCacheKey().
    */
   [[nodiscard]] static std::string MakeDisplayKey(const ArrowFileSystemConfig& config, const std::string& cache_key);
 

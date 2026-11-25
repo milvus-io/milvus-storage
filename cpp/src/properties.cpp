@@ -476,6 +476,48 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "The default is 5000, matching Lance's default. Set to 0 to disable the AIMD rate ceiling.",
                       uint32_t(5000),
                       ValidatePropertyType() + ValidatePropertyRange<uint32_t>(0, UINT32_MAX)),
+
+    // --- talon properties ---
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_MODE,
+                      PropertyType::UINT32,
+                      "Talon read routing: 0 (disabled) reads from origin, 1 (full) routes all reads through Talon, "
+                      "and 2 (small_reads) routes requests up to fs.talon.small_read_threshold through Talon.",
+                      static_cast<uint32_t>(TalonMode::Disabled),
+                      ValidatePropertyType() +
+                          ValidatePropertyEnum<uint32_t>(TalonMode::Disabled, TalonMode::Full, TalonMode::SmallReads)),
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_OPEN_ONLY,
+                      PropertyType::BOOL,
+                      "Limit configured Talon routing to Parquet/Vortex reader-open metadata and Lance V2 "
+                      "manifests and data-file footers. Data reads use origin storage. Legacy Lance keeps "
+                      "fs.talon.mode for both footer and data reads. Paimon data-split readers use Talon for table "
+                      "schema/snapshot open, then origin for data-file footers and data. Paimon direct-file readers "
+                      "follow Parquet/Vortex routing. OpenDAL reads without an explicit metadata phase use origin, "
+                      "including Iceberg FileIO and Paimon planning/deletion-vector reads. "
+                      "Ignored when fs.talon.mode is 0.",
+                      false,
+                      ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_SMALL_READ_THRESHOLD,
+                      PropertyType::UINT32,
+                      "Inclusive request size threshold in bytes for small_reads mode, before EOF clamping. "
+                      "Must be between 1 byte and 1 MiB. Ignored in other modes.",
+                      uint32_t(512U * 1024U),
+                      ValidatePropertyType() + ValidatePropertyRange<uint32_t>(1, 1024U * 1024U)),
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_COORDINATOR,
+                      PropertyType::STRING,
+                      "The Talon coordinator address used for block routing.",
+                      "",
+                      ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_BLOCK_SIZE,
+                      PropertyType::UINT32,
+                      "The Talon block size in bytes.",
+                      256U * 1024U * 1024U,
+                      ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR,
+                      PropertyType::UINT32,
+                      "Maximum idle TCP connections per peer address in each Talon coordinator/worker pool. "
+                      "Does not limit active connections.",
+                      uint32_t(256),
+                      ValidatePropertyType() + ValidatePropertyRange<uint32_t>(1, UINT32_MAX)),
     // --- Cross-tenant access properties define ---
     REGISTER_PROPERTY(PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT,
                       PropertyType::STRING,

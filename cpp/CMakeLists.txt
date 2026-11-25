@@ -63,7 +63,7 @@ endif()
 
 # Rust bridge for Vortex and Lance formats (always built)
 set(RUST_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/bridge/rust)
-set(CORROSION_FEATURES "")
+set(CORROSION_FEATURES talon)
 if (WITH_CRT)
   list(APPEND CORROSION_FEATURES s3-crt-async)
 endif()
@@ -287,7 +287,7 @@ if (WITH_JNI)
   endif()
 endif()
 
-if (WITH_ASAN STREQUAL "True")
+if (WITH_ASAN)
   set(CMAKE_CXX_FLAGS
     "-fno-stack-protector -fno-omit-frame-pointer -fno-var-tracking -g -fsanitize=address ${CMAKE_CXX_FLAGS}"
   )
