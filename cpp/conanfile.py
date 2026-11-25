@@ -49,6 +49,9 @@ class StorageConan(ConanFile):
         "glog/*:with_gflags": True,
         "glog/*:shared": True,
         "gflags/*:shared": True,
+        # milvus-common's thread_pool.cc expects the OpenMP build of OpenBLAS
+        # (openblas_set_num_threads); keep the threading model it pins.
+        "openblas/*:use_openmp": True,
         "openssl/*:shared": True,
         "protobuf/*:shared": True,
         "grpc/*:shared": True,
@@ -175,7 +178,6 @@ class StorageConan(ConanFile):
         self.requires("libavrocpp/1.12.1.1@milvus/dev#b4854183542196740ec9a004fdfff7ec")
         self.requires("google-cloud-cpp/2.28.0@milvus/dev#468918b43cec43624531a0340398cf43")
         self.requires("opentelemetry-cpp/1.23.0@milvus/dev#11bc565ec6e82910ae8f7471da756720")
-        self.requires("milvus-common/1.0.0-a88c21f@milvus/dev#0eb9a7f2f5d5fe0e7d37f45f3f9a38ea")
         # azure-sdk-for-cpp is a transitive dep of Arrow, but must be declared
         # as a direct dep so CMakeDeps generates standalone cmake config files.
         # Without this, find_package(Azure) can't find include directories.
@@ -197,6 +199,10 @@ class StorageConan(ConanFile):
             self.requires("gtest/1.15.0")
         if self.settings.os != "Macos":
             self.requires("libunwind/1.8.1#748a981ace010b80163a08867b732e71")
+        if self.settings.os == "Linux":
+            # Required by the milvus-common source build (thread_pool.cc is
+            # guarded by __linux__ there); not used by milvus-storage itself.
+            self.requires("openblas/0.3.30")
 
     def validate(self):
         if self.settings.compiler.get_safe("cppstd"):

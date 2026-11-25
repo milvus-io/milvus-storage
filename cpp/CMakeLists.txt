@@ -42,7 +42,7 @@ find_package(AWSSDK REQUIRED CONFIG)
 find_package(aws-c-io REQUIRED CONFIG)
 find_package(aws-c-http REQUIRED CONFIG)
 find_package(aws-c-s3 REQUIRED CONFIG)
-find_package(milvus-common REQUIRED)
+include(cmake/libmilvus-common.cmake)
 find_package(libavrocpp QUIET)
 if(NOT libavrocpp_FOUND)
   find_package(avro-cpp REQUIRED)
@@ -67,7 +67,7 @@ add_subdirectory(${RUST_BRIDGE_PATH})
 list(APPEND LINK_LIBS prsbridge)
 list(APPEND INCLUDE_PATHS ${RUST_BRIDGE_PATH}/include/)
 
-list(APPEND LINK_LIBS milvus-common::milvus-common)
+list(APPEND LINK_LIBS milvus-common)
 message(STATUS "milvus-common found; enabling Vortex cache translator")
 
 if(NOT CURL_INCLUDE_DIRS)
@@ -146,7 +146,7 @@ if (WITH_FIU)
   add_definitions(-DBUILD_WITH_FIU)
   list(APPEND LINK_LIBS fiu)
   list(APPEND INCLUDE_PATHS ${FIU_SOURCE_DIR})
-  
+
   message(STATUS "Fault injection enabled with libfiu")
 endif()
 

@@ -256,6 +256,11 @@ def main():
   database = json.load(open(os.path.join(build_path, db_path)))
   files = [make_absolute(entry['file'], entry['directory'])
            for entry in database]
+  # Skip sources pulled in by third-party FetchContent wrappers (e.g.
+  # milvus-common-src): they are pinned upstream code and are not held to
+  # this repository's clang-tidy checks.
+  fetchcontent_src_re = re.compile(r'(^|/)[^/]*-src/')
+  files = [f for f in files if not fetchcontent_src_re.search(f)]
 
   max_task = args.j
   if max_task == 0:

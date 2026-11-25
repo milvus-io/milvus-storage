@@ -19,7 +19,9 @@ concurrency:
 jobs:
   mac-build:
     runs-on: macos-26
-    timeout-minutes: 180
+    # Building the full dependency graph now includes compiling the
+    # FetchContent-ed milvus-common, which pushes the mac run past 3 hours.
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 

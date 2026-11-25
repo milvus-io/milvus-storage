@@ -18,7 +18,7 @@ corrosion_set_env_vars(rust_bridge
     "RUSTFLAGS=-C force-frame-pointers=yes"
 )
 
-# corrosion_add_cxxbridge can only import a single static library; 
+# corrosion_add_cxxbridge can only import a single static library;
 # otherwise, `rlib` will conflict.
 corrosion_add_cxxbridge(rust-bridge
     CRATE rust_bridge
@@ -46,7 +46,6 @@ target_include_directories(prsbridge PUBLIC ${Arrow_INCLUDE_DIRS}
     ${PROJECT_SOURCE_DIR}/include
 )
 target_include_directories(prsbridge PRIVATE
-    $<TARGET_PROPERTY:milvus-common::milvus-common,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
-target_link_libraries(prsbridge PUBLIC rust-bridge PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(prsbridge PUBLIC rust-bridge PRIVATE milvus-common nlohmann_json::nlohmann_json)
