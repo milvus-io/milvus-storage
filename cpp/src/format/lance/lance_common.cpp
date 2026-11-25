@@ -62,7 +62,8 @@ arrow::Result<StorageOptions> ToWriterOptions(const ArrowFileSystemConfig& confi
   };
 
   const bool use_ak_sk = !config.use_iam && !config.access_key_id.empty() && !config.access_key_value.empty();
-  const bool use_supported_credentials = config.use_iam || use_ak_sk;
+  // S3 broker credentials cannot be reconstructed by the native writer.
+  const bool use_supported_credentials = (config.use_iam || use_ak_sk) && !config.IsAwsCredentialBrokerEnabled();
   const auto& provider = config.cloud_provider;
   if (provider == kCloudProviderAWS) {
     if (use_supported_credentials && config.role_arn.empty()) {
@@ -76,6 +77,7 @@ arrow::Result<StorageOptions> ToWriterOptions(const ArrowFileSystemConfig& confi
     }
   }
   if (provider == kCloudProviderAzure) {
+    // The native writer cannot reconstruct Broker SAS credentials in either mode.
     if (use_supported_credentials && !config.IsAzureCredentialBrokerEnabled()) {
       set("azure_storage_account_name", config.access_key_id);
       if (use_ak_sk) {
@@ -94,7 +96,7 @@ arrow::Result<StorageOptions> ToWriterOptions(const ArrowFileSystemConfig& confi
     }
   }
   if (provider == kCloudProviderGCP) {
-    if (config.use_iam && config.gcp_target_service_account.empty()) {
+    if (config.use_iam && config.gcp_target_service_account.empty() && config.credential_endpoint.empty()) {
       return options;
     }
   }

@@ -123,14 +123,16 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
 
   if (config_.IsAzureCredentialBrokerEnabled()) {
     fs::AzureSasBrokerConfig broker_config{
-        .endpoint = config_.azure_credential_endpoint,
+        .endpoint = config_.GetCredentialEndpoint(),
         .region = config_.region,
         .bucket = config_.bucket_name,
-        .client_id = config_.azure_client_id,
-        .tenant_id = config_.azure_tenant_id,
+        // Match AWS: inactive target fields do not affect Broker IAM identity.
+        .client_id = config_.UsesBrokerIam() ? "" : config_.azure_client_id,
+        .tenant_id = config_.UsesBrokerIam() ? "" : config_.azure_tenant_id,
         .account_name = config_.access_key_id,
         .duration_seconds = config_.load_frequency,
         .request_timeout_ms = config_.request_timeout_ms,
+        .use_iam = config_.UsesBrokerIam(),
     };
     ARROW_RETURN_NOT_OK(
         options.ConfigureSASTokenPolicy(std::make_shared<fs::AzureSasTokenPolicy>(std::move(broker_config))));

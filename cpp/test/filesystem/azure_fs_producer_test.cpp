@@ -92,7 +92,7 @@ ArrowFileSystemConfig ExternalBrokerConfig(const std::string& address) {
   config.alias = "customer";
   config.use_iam = false;
   config.address = address;
-  config.azure_credential_endpoint = "https://broker.internal/v1/credentials/sas";
+  config.credential_endpoint = "https://broker.internal/v1/credentials/sas";
   config.azure_client_id = "client-id";
   config.azure_tenant_id = "tenant-id";
   config.region = "eastus";
@@ -116,6 +116,11 @@ TEST_F(AzureFileSystemProducerTest, ExternalRejectsInvalidAccountNamesInEveryCre
   shared_key.use_iam = false;
   shared_key.access_key_value = "c2hhcmVkLWtleQ==";
 
+  auto broker_iam = ExternalBrokerConfig("core.windows.net");
+  broker_iam.use_iam = true;
+  broker_iam.azure_client_id.clear();
+  broker_iam.azure_tenant_id.clear();
+
   const std::vector<std::string> invalid_accounts = {"",
                                                      "ab",
                                                      std::string(25, 'a'),
@@ -134,7 +139,8 @@ TEST_F(AzureFileSystemProducerTest, ExternalRejectsInvalidAccountNamesInEveryCre
                                                      "account\n",
                                                      std::string("account\0", 8),
                                                      "accöunt"};
-  for (auto config : {ExternalIamConfig("core.windows.net"), ExternalBrokerConfig("core.windows.net"), shared_key}) {
+  for (auto config :
+       {ExternalIamConfig("core.windows.net"), ExternalBrokerConfig("core.windows.net"), broker_iam, shared_key}) {
     SCOPED_TRACE(config.use_iam);
     SCOPED_TRACE(config.IsAzureCredentialBrokerEnabled());
     for (const auto& account : invalid_accounts) {
@@ -301,6 +307,51 @@ TEST_F(AzureFileSystemProducerTest, ExternalBrokerSasFollowsTheSameRule) {
   // The SAS policy only contacts the Broker on the first request.
   status = Make(ExternalBrokerConfig("core.windows.net"));
   EXPECT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST_F(AzureFileSystemProducerTest, LegacyEndpointKeepsDirectConfigOnTargetIdentity) {
+  const auto target = ExternalBrokerConfig("core.windows.net");
+  auto legacy = target;
+  legacy.azure_credential_endpoint = target.credential_endpoint;
+  legacy.credential_endpoint.clear();
+  legacy.use_iam = true;
+  auto iam = target;
+  iam.use_iam = true;
+  iam.azure_credential_endpoint = "https://unused/credentials";
+  const auto target_fs = AzureFileSystemProducer(target).Make();
+  const auto legacy_fs = AzureFileSystemProducer(legacy).Make();
+  const auto iam_fs = AzureFileSystemProducer(iam).Make();
+  ASSERT_TRUE(target_fs.ok()) << target_fs.status();
+  ASSERT_TRUE(legacy_fs.ok()) << legacy_fs.status();
+  ASSERT_TRUE(iam_fs.ok()) << iam_fs.status();
+  EXPECT_TRUE((*target_fs)->Equals(**legacy_fs));
+  EXPECT_FALSE((*target_fs)->Equals(**iam_fs));
+
+  for (const auto mode : {TalonMode::Disabled, TalonMode::Full}) {
+    auto canonical = target;
+    canonical.talon_mode = legacy.talon_mode = iam.talon_mode = mode;
+    EXPECT_EQ(canonical.GetCacheKey(), legacy.GetCacheKey());
+    EXPECT_NE(canonical.GetCacheKey(), iam.GetCacheKey());
+    auto different_tenant = legacy;
+    different_tenant.azure_tenant_id = "other-tenant";
+    EXPECT_NE(legacy.GetCacheKey(), different_tenant.GetCacheKey());
+    auto canonical_only = iam;
+    canonical_only.azure_credential_endpoint.clear();
+    EXPECT_EQ(iam.GetCacheKey(), canonical_only.GetCacheKey());
+  }
+}
+
+TEST_F(AzureFileSystemProducerTest, BrokerIamDoesNotRequireLocalIdentityOrTarget) {
+  auto config = ExternalBrokerConfig("core.windows.net");
+  config.use_iam = true;
+  config.azure_client_id.clear();
+  config.azure_tenant_id.clear();
+  EXPECT_TRUE(Make(config).ok());
+
+  config.credential_endpoint.clear();
+  const auto status = Make(config);
+  EXPECT_TRUE(status.IsInvalid()) << status;
+  EXPECT_NE(status.message().find(kManagedIdentityCheck), std::string::npos);
 }
 
 }  // namespace milvus_storage

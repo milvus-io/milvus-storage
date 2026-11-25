@@ -29,18 +29,21 @@
 
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/gcp/gcp_broker_credential_provider.h"
 #include "milvus-storage/filesystem/s3/s3_auth_signer.h"
 
 namespace milvus_storage {
 
 namespace {
 
-// GCP IAM caps impersonation token lifetime at 3600s (without an
-// `iam.allowServiceAccountCredentialLifetimeExtension` org-policy override).
-// Oversize values are rejected at `BuildGcpProviderFromConfig` rather than
-// silently clamped so callers see a consistent answer with the Rust Lance
-// path (`lance_bridgeimpl::GcpImpersonationConfig::extract`) and with the
-// AWS `AssumeRoleConfig::parse` style.
+// Accepted range for load_frequency as the requested access-token lifetime
+// of impersonated and Broker-minted tokens. GCP IAM generateAccessToken
+// rejects lifetimes above 3600s unless the
+// `iam.allowServiceAccountCredentialLifetimeExtension` org policy raises the
+// cap, and tokens shorter than 900s would be refreshed more often than they
+// are useful. Out-of-range values are rejected at `BuildGcpProviderFromConfig`
+// rather than silently clamped, so the lifetime a filesystem actually requests
+// is always the one its configuration states.
 constexpr int kMaxImpersonationTokenLifetime = 3600;
 constexpr int kMinImpersonationTokenLifetime = 900;
 
@@ -192,31 +195,62 @@ class HmacProvider : public GcpCredentialProvider {
 }  // namespace
 
 arrow::Result<std::shared_ptr<GcpCredentialProvider>> BuildGcpProviderFromConfig(const ArrowFileSystemConfig& config) {
-  if (config.use_iam && !config.gcp_target_service_account.empty()) {
-    // Reject rather than clamp so this path and the Rust Lance path
-    // (`GcpImpersonationConfig::extract`, `[900, 3600]`) reject identically;
-    // otherwise `load_frequency=7200` works silently through the filesystem
-    // producer but errors out of `open_dataset`.
+  const bool has_hmac = !config.access_key_id.empty() && !config.access_key_value.empty();
+  const bool use_broker = !config.credential_endpoint.empty();
+  const bool has_target = !config.gcp_target_service_account.empty();
+  if (has_hmac && (use_broker || has_target) && !(use_broker && config.use_iam)) {
+    // With Talon, the Broker fields describe the identity Talon workers use
+    // and the HMAC keys stay the origin filesystem's own credential. Without
+    // Talon the config asks for two identities at once.
+    if (config.talon_mode == TalonMode::Disabled) {
+      return arrow::Status::Invalid(
+          "GCP filesystem: access_key_id/access_key_value cannot be combined with "
+          "gcp_target_service_account or credential_endpoint; choose one credential mode");
+    }
+    return std::make_shared<HmacProvider>(config.access_key_id, config.access_key_value);
+  }
+  if (use_broker || has_target) {
+    if (use_broker && !config.use_iam && !has_target) {
+      return arrow::Status::Invalid("GCP credential broker requires fs.gcp_target_service_account");
+    }
+    // Reject rather than clamp: `load_frequency=7200` must fail here instead
+    // of silently requesting a 3600s token under a configuration that claims
+    // otherwise.
     if (config.load_frequency < kMinImpersonationTokenLifetime ||
         config.load_frequency > kMaxImpersonationTokenLifetime) {
       return arrow::Status::Invalid("GCP impersonation requires load_frequency in [", kMinImpersonationTokenLifetime,
                                     ", ", kMaxImpersonationTokenLifetime, "], got ", config.load_frequency);
     }
+    // Match AWS: the endpoint selects the Broker; use_iam selects its own
+    // identity instead of a target service account.
+    if (use_broker) {
+      return std::make_shared<GcpBrokerCredentialProvider>(GcpBrokerConfig{
+          .endpoint = config.credential_endpoint,
+          .region = config.region,
+          .bucket = config.bucket_name,
+          .target_service_account = config.use_iam ? "" : config.gcp_target_service_account,
+          .duration_seconds = config.load_frequency,
+          .request_timeout_ms = config.request_timeout_ms,
+          .use_iam = config.use_iam,
+      });
+    }
+    // The target alone selects impersonation; use_iam=true is accepted but
+    // not required.
     return std::make_shared<IamImpersonateProvider>(config.gcp_target_service_account, config.load_frequency);
   }
   if (config.use_iam) {
     return std::make_shared<IamVmProvider>();
   }
-  if (!config.access_key_id.empty() && !config.access_key_value.empty()) {
+  if (has_hmac) {
     return std::make_shared<HmacProvider>(config.access_key_id, config.access_key_value);
   }
   return arrow::Status::Invalid(
-      "GCP filesystem: no credentials configured. Set use_iam=true (VM default SA, or target-SA "
-      "impersonation when gcp_target_service_account is also set), or provide both HMAC "
-      "access_key_id and access_key_value. Got: use_iam=false, access_key_id=",
+      "GCP filesystem: no credentials configured. Set use_iam=true (VM default SA), "
+      "gcp_target_service_account (target-SA impersonation, through the credential broker when "
+      "credential_endpoint is also set), or provide both HMAC access_key_id and access_key_value. "
+      "Got: use_iam=false, access_key_id=",
       config.access_key_id.empty() ? "(empty)" : "(set)",
-      ", access_key_value=", config.access_key_value.empty() ? "(empty)" : "(set)",
-      ", gcp_target_service_account=", config.gcp_target_service_account.empty() ? "(empty)" : "(set)");
+      ", access_key_value=", config.access_key_value.empty() ? "(empty)" : "(set)");
 }
 
 }  // namespace milvus_storage

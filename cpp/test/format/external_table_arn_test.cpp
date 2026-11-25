@@ -583,10 +583,10 @@ class ExternalTableGcpImpersonationTest : public ::testing::TestWithParam<std::s
     api::SetValue(plain_write_props_, PROPERTY_FS_USE_SSL, "true");
 
     // --- Read properties: extfs.gcpsa.* with gcp_target_service_account ---
-    // use_iam=true is required to reach IamImpersonateProvider on the C++
-    // side (gcp_credential_provider.cpp:160); without it the producer falls
-    // through to HmacProvider with empty AK/SK → no Authorization header,
-    // ACCESS_DENIED on parquet data reads.
+    // The target alone selects IamImpersonateProvider in
+    // BuildGcpProviderFromConfig; use_iam=true is accepted but not required.
+    // No credential_endpoint is configured, so use_iam keeps the source
+    // identity on this VM instead of selecting Broker IAM.
     api::SetValue(read_props_, "extfs.gcpsa.storage_type", "remote");
     api::SetValue(read_props_, "extfs.gcpsa.cloud_provider", "gcp");
     api::SetValue(read_props_, "extfs.gcpsa.address", address_.c_str());
@@ -969,7 +969,7 @@ class ExternalTableAzureArnTest : public ::testing::TestWithParam<std::string> {
     api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_ID, account_name_.c_str());
     api::SetValue(write_props_, PROPERTY_FS_AZURE_CLIENT_ID, client_id_.c_str());
     api::SetValue(write_props_, PROPERTY_FS_AZURE_TENANT_ID, tenant_id_.c_str());
-    api::SetValue(write_props_, PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT, credential_endpoint_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_CREDENTIAL_ENDPOINT, credential_endpoint_.c_str());
     api::SetValue(write_props_, PROPERTY_FS_LOAD_FREQUENCY, "3600");
     api::SetValue(write_props_, PROPERTY_FS_REQUEST_TIMEOUT_MS, "10000");
     api::SetValue(write_props_, PROPERTY_FS_USE_SSL, "true");
@@ -983,7 +983,7 @@ class ExternalTableAzureArnTest : public ::testing::TestWithParam<std::string> {
     api::SetValue(read_props_, "extfs.azsas.access_key_id", account_name_.c_str());
     api::SetValue(read_props_, "extfs.azsas.azure_client_id", client_id_.c_str());
     api::SetValue(read_props_, "extfs.azsas.azure_tenant_id", tenant_id_.c_str());
-    api::SetValue(read_props_, "extfs.azsas.azure_credential_endpoint", credential_endpoint_.c_str());
+    api::SetValue(read_props_, "extfs.azsas.credential_endpoint", credential_endpoint_.c_str());
     api::SetValue(read_props_, "extfs.azsas.load_frequency", "3600");
     api::SetValue(read_props_, "extfs.azsas.request_timeout_ms", "10000");
     api::SetValue(read_props_, "extfs.azsas.use_ssl", "true");
@@ -1105,7 +1105,7 @@ TEST_P(ExternalTableAzureArnTest, ReadWithBrokeredSas) {
       {"extfs.azsas.access_key_id", account_name_},
       {"extfs.azsas.azure_client_id", client_id_},
       {"extfs.azsas.azure_tenant_id", tenant_id_},
-      {"extfs.azsas.azure_credential_endpoint", credential_endpoint_},
+      {"extfs.azsas.credential_endpoint", credential_endpoint_},
       {"extfs.azsas.load_frequency", "3600"},
       {"extfs.azsas.request_timeout_ms", "10000"},
       {"extfs.azsas.use_ssl", "true"},
@@ -1191,7 +1191,7 @@ TEST_P(ExternalTableAzureArnTest, CachedReadsFetchBrokeredSasOnce) {
 
   OneShotHttpPostRelay broker_relay(credential_endpoint_);
   auto cache_read_props = read_props_;
-  api::SetValue(cache_read_props, "extfs.azsas.azure_credential_endpoint", broker_relay.endpoint().c_str());
+  api::SetValue(cache_read_props, "extfs.azsas.credential_endpoint", broker_relay.endpoint().c_str());
   ASSERT_AND_ASSIGN(auto fs_config, FilesystemCache::resolve_config(cache_read_props, result.explore_dir.c_str()));
 
   constexpr size_t cache_hit_iterations = 10;

@@ -100,7 +100,7 @@ TEST_F(IcebergStorageOptionsTest, AzureKeys) {
   EXPECT_EQ(opts.count("milvus_fs_cache_key"), 0);
 }
 
-TEST_F(IcebergStorageOptionsTest, WriterRejectsAzureCredentialBroker) {
+TEST_F(IcebergStorageOptionsTest, AzureWriterRejectsBrokerCredentials) {
   ArrowFileSystemConfig config;
   config.storage_type = "remote";
   config.cloud_provider = kCloudProviderAzure;
@@ -109,16 +109,35 @@ TEST_F(IcebergStorageOptionsTest, WriterRejectsAzureCredentialBroker) {
   config.bucket_name = "mycontainer";
   config.region = "westus3";
   config.address = "core.windows.net";
-  config.use_iam = true;
+  config.use_iam = false;
   config.azure_client_id = "client-id";
   config.azure_tenant_id = "tenant-id";
-  config.azure_credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
+  config.credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
   config.load_frequency = 3600;
   config.request_timeout_ms = 5000;
 
   auto result = ToWriterOptions(config);
   ASSERT_FALSE(result.ok());
   EXPECT_TRUE(result.status().IsNotImplemented()) << result.status().ToString();
+
+  // Broker IAM must not silently fall back to the native writer's local identity.
+  config.use_iam = true;
+  for (const bool include_target_identity : {false, true}) {
+    SCOPED_TRACE(include_target_identity);
+    config.azure_client_id = include_target_identity ? "client-id" : "";
+    config.azure_tenant_id = include_target_identity ? "tenant-id" : "";
+
+    EXPECT_TRUE(ToWriterOptions(config).status().IsNotImplemented());
+    config.credential_endpoint.clear();
+    ASSERT_AND_ASSIGN(const auto opts, ToWriterOptions(config));
+    EXPECT_EQ(opts.at("adls.account-name"), "myaccount");
+    EXPECT_EQ(opts.at("adls.endpoint-suffix"), "core.windows.net");
+    EXPECT_EQ(opts.count("adls.account-key"), 0);
+    EXPECT_EQ(opts.count("azure_broker_endpoint"), 0);
+    EXPECT_EQ(opts.count("azure_broker_client_id"), 0);
+    EXPECT_EQ(opts.count("azure_broker_tenant_id"), 0);
+    config.credential_endpoint = "http://credential-broker/v1/credentials/assume-role";
+  }
 }
 
 TEST_F(IcebergStorageOptionsTest, AliyunKeys) {
@@ -201,6 +220,9 @@ TEST_F(IcebergStorageOptionsTest, GcpIamUsesDefaultCredentials) {
   ASSERT_AND_ASSIGN(auto opts, ToWriterOptions(config));
 
   EXPECT_TRUE(opts.empty());
+
+  config.credential_endpoint = "https://broker/credentials";
+  EXPECT_TRUE(ToWriterOptions(config).status().IsNotImplemented());
 }
 
 TEST_F(IcebergStorageOptionsTest, WriterRejectsAwsAssumeRole) {

@@ -175,6 +175,24 @@ TEST(PaimonStorageOptionsTest, GcpStaticAndAnonymous) {
   EXPECT_EQ(options.at("gcs.allow-anonymous"), "true");
 }
 
+TEST(PaimonStorageOptionsTest, WriterRejectsGcpAndAzureBrokerCredentials) {
+  for (const auto* provider : {kCloudProviderGCP, kCloudProviderAzure}) {
+    for (const bool use_iam : {false, true}) {
+      ArrowFileSystemConfig config;
+      config.storage_type = "remote";
+      config.cloud_provider = provider;
+      config.use_iam = use_iam;
+      config.credential_endpoint = "https://broker/credentials";
+      EXPECT_TRUE(ToStorageOptions(config).status().IsNotImplemented()) << provider << ": " << use_iam;
+      if (config.cloud_provider == kCloudProviderAzure) {
+        config.azure_credential_endpoint = config.credential_endpoint;
+        config.credential_endpoint.clear();
+        EXPECT_TRUE(ToStorageOptions(config).status().IsNotImplemented());
+      }
+    }
+  }
+}
+
 TEST(PaimonStorageOptionsTest, UnsupportedProviderFailsClosed) {
   auto config = MakeAwsConfig();
   config.cloud_provider = kCloudProviderTencent;

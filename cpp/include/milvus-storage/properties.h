@@ -106,6 +106,7 @@ struct PropertyInfo {
 #define PROPERTY_FS_TALON_OPEN_ONLY "fs.talon.open_only"
 #define PROPERTY_FS_TALON_SMALL_READ_THRESHOLD "fs.talon.small_read_threshold"
 #define PROPERTY_FS_TALON_COORDINATOR "fs.talon.coordinator"
+#define PROPERTY_FS_TALON_NAMESPACE "fs.talon.namespace"
 #define PROPERTY_FS_TALON_BLOCK_SIZE "fs.talon.block_size"
 #define PROPERTY_FS_TALON_MAX_IDLE_PER_ADDR "fs.talon.max_idle_per_addr"
 

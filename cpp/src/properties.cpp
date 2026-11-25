@@ -361,8 +361,10 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_USE_IAM,
                       PropertyType::BOOL,
-                      "Whether to use IAM for the filesystem storage service. For AWS, Aliyun and Tencent "
-                      "credential Broker requests, "
+                      "Whether to authenticate with this process's own cloud identity (AWS instance role, Azure "
+                      "workload/managed identity, GCP VM service account). For GCP, "
+                      "fs.gcp_target_service_account selects impersonation when no credential endpoint is set. "
+                      "For AWS, Aliyun, Tencent, GCP, Azure and Talon credential Broker requests, "
                       "true selects the Broker's own IAM identity; false uses the supplied target identity.",
                       false,
                       ValidatePropertyType()),
@@ -507,6 +509,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "The Talon coordinator address used for block routing.",
                       "",
                       ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_TALON_NAMESPACE,
+                      PropertyType::STRING,
+                      "Optional Talon request namespace. Empty uses the default namespace, independently of "
+                      "fs.credential_endpoint.",
+                      "",
+                      ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_FS_TALON_BLOCK_SIZE,
                       PropertyType::UINT32,
                       "The Talon block size in bytes.",
@@ -536,14 +544,19 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_CREDENTIAL_ENDPOINT,
                       PropertyType::STRING,
-                      "The HTTP(S) credential Broker endpoint for S3 temporary credentials.",
+                      "The HTTP(S) credential Broker endpoint. AWS fetches STS credentials, Azure fetches SAS tokens, "
+                      "GCP fetches access tokens, and Talon "
+                      "sends its request credentials through it. Talon derives the Broker request and origin settings "
+                      "from the filesystem properties. fs.use_iam selects the Broker's own IAM identity; otherwise "
+                      "the supplied target identity is used.",
                       "",
                       std::nullopt),
-    REGISTER_PROPERTY(PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT,
-                      PropertyType::STRING,
-                      "The HTTP(S) endpoint used to obtain temporary Azure SAS credentials.",
-                      "",
-                      std::nullopt),
+    REGISTER_PROPERTY(
+        PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT,
+        PropertyType::STRING,
+        "Legacy Azure target-identity SAS broker endpoint. A nonempty fs.credential_endpoint takes precedence.",
+        "",
+        std::nullopt),
     // --- writer properties define ---
     REGISTER_PROPERTY(PROPERTY_WRITER_POLICY,
                       PropertyType::STRING,

@@ -101,7 +101,8 @@ arrow::Result<std::unordered_map<std::string, std::string>> ToWriterOptions(cons
 
   // A non-IAM configuration is usable only when both credential values exist.
   const bool use_ak_sk = !config.use_iam && !config.access_key_id.empty() && !config.access_key_value.empty();
-  const bool use_supported_credentials = config.use_iam || use_ak_sk;
+  // S3 broker credentials cannot be reconstructed by the native writer.
+  const bool use_supported_credentials = (config.use_iam || use_ak_sk) && !config.IsAwsCredentialBrokerEnabled();
   const auto& provider = config.cloud_provider;
   if (provider == kCloudProviderAWS) {
     // role_arn selects AssumeRole, which intentionally falls through to the
@@ -118,7 +119,7 @@ arrow::Result<std::unordered_map<std::string, std::string>> ToWriterOptions(cons
   }
   if (provider == kCloudProviderAzure) {
     // Broker-issued SAS credentials belong to the C++ filesystem read path and
-    // are not reconstructed by the native writer.
+    // are not reconstructed by the native writer in either credential mode.
     if (use_supported_credentials && !config.IsAzureCredentialBrokerEnabled()) {
       set("adls.account-name", config.access_key_id);
       set("adls.endpoint-suffix", config.address);
@@ -131,7 +132,7 @@ arrow::Result<std::unordered_map<std::string, std::string>> ToWriterOptions(cons
   if (provider == kCloudProviderGCP) {
     // A target service account requests impersonation; only default IAM is
     // supported by this native writer path.
-    if (config.use_iam && config.gcp_target_service_account.empty()) {
+    if (config.use_iam && config.gcp_target_service_account.empty() && config.credential_endpoint.empty()) {
       return options;
     }
   }
