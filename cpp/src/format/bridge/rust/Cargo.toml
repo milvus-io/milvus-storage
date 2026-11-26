@@ -12,7 +12,7 @@ io-trace = []
 talon = ["dep:talon"]
 
 [dependencies]
-talon = { package = "talon-rust-client", git = "https://github.com/milvus-io/talon.git", rev = "d22ec390abd766471553f492de1d1cc46f9cb703", optional = true }
+talon = { package = "talon-rust-client", git = "https://github.com/milvus-io/talon.git", rev = "86230dddc1f71ea8d820dcca4d18d9b03e04e600", optional = true }
 
 # common dependencies
 anyhow = "1.0.99"
