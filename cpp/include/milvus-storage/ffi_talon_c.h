@@ -16,7 +16,7 @@ extern "C" {
 /// and ignores target identity fields. false (default) uses the supplied target identity.
 /// Property-derived Broker defaults are scoped to fs.bucket_name. Per-request
 /// Broker overrides supply their own descriptor; URI buckets must match it.
-/// Broker-backed objects use s3://, ali://, tc://, gcs://, or az:// for their provider.
+/// Talon object URIs use s3://, ali://, tc://, gcs://, or az:// for their provider.
 typedef uintptr_t LoonTalonClientHandle;
 
 /// Optional overrides for one operation, without changing the shared client.
