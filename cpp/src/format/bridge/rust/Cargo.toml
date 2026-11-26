@@ -13,7 +13,7 @@ s3-crt-async = []
 talon = ["dep:talon", "s3-crt-async"]
 
 [dependencies]
-talon = { package = "talon-rust-client", git = "https://github.com/milvus-io/talon.git", rev = "010ab9bc9945ca21959e6e773ebd802041b5d079", optional = true }
+talon = { package = "talon-rust-client", git = "https://github.com/milvus-io/talon.git", rev = "d22ec390abd766471553f492de1d1cc46f9cb703", optional = true }
 
 # common dependencies
 anyhow = "1.0.99"

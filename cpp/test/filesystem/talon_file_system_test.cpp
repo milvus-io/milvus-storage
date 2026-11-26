@@ -34,6 +34,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <tuple>
 #include <utility>
@@ -188,7 +189,7 @@ TEST(TalonRawBridgeTest, InvalidBrokerIdentityEncodingReturnsStatus) {
 }
 
 TEST(TalonRawBridgeTest, RejectsUnsupportedBrokerCloudsWithoutAwsSubstitution) {
-  for (const auto* provider : {"aliyun", "tencent", "huawei", "volcengine"}) {
+  for (const auto* provider : {"huawei", "volcengine"}) {
     api::Properties properties;
     properties[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
     properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/assume-role");
@@ -218,12 +219,14 @@ class TalonBrokerRequestTest : public ::testing::Test {
                       const std::string& uri,
                       Operation operation,
                       nlohmann::json& descriptor,
-                      const LoonTalonRequestOptions* overrides = nullptr) {
+                      const LoonTalonRequestOptions* overrides = nullptr,
+                      bool expect_worker_broker = false) {
     const auto namespace_it = properties.find("fs.talon.namespace");
     std::string expected_namespace =
         namespace_it == properties.end() ? "" : std::get<std::string>(namespace_it->second);
     const auto broker_it = properties.find(PROPERTY_FS_CREDENTIAL_ENDPOINT);
-    bool expect_broker = broker_it != properties.end() && !std::get<std::string>(broker_it->second).empty();
+    bool expect_broker =
+        expect_worker_broker || (broker_it != properties.end() && !std::get<std::string>(broker_it->second).empty());
     if (!expect_broker && provider == kCloudProviderAzure) {
       const auto legacy = properties.find(PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT);
       expect_broker = legacy != properties.end() && !std::get<std::string>(legacy->second).empty();
@@ -367,7 +370,11 @@ class TalonBrokerRequestTest : public ::testing::Test {
           EXPECT_EQ(payload[metadata_end + 2], 8);  // StatObject
           // Object backend follows the schema and message discriminant.
           ASSERT_GE(payload.size(), metadata_end + 10);
-          EXPECT_EQ(payload[metadata_end + 6], provider == "gcp" ? 1 : provider == "azure" ? 2 : 0);
+          constexpr std::array<std::string_view, 5> backend_schemes = {"s3", "gcs", "az", "ali", "tc"};
+          const auto scheme = std::string_view(uri).substr(0, uri.find(':'));
+          const auto backend = std::find(backend_schemes.begin(), backend_schemes.end(), scheme);
+          ASSERT_NE(backend, backend_schemes.end());
+          EXPECT_EQ(payload[metadata_end + 6], static_cast<uint8_t>(std::distance(backend_schemes.begin(), backend)));
           body = {6, 0, 9, 0, 0, 0};  // ObjectStat(size=0, version="")
           body.resize(22, 0);
         }
@@ -420,45 +427,72 @@ TEST_F(TalonBrokerRequestTest, S3DescriptorIncludesOriginAndEscapedIdentity) {
                                                   {"request_timeout_ms", 3000}}));
 }
 
-TEST_F(TalonBrokerRequestTest, GcpImplicitStatUsesBearerBackendAndRetainsDescriptor) {
+class TalonGcpBrokerRequestTest : public TalonBrokerRequestTest, public ::testing::WithParamInterface<bool> {};
+
+TEST_P(TalonGcpBrokerRequestTest, GcpImplicitStatUsesBearerBackendAndRetainsDescriptor) {
+  const bool use_worker_broker = GetParam();
   api::Properties properties;
-  properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/assume-role");
+  if (use_worker_broker) {
+    properties[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+    properties[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(TalonMode::Full);
+    properties[PROPERTY_FS_USE_IAM] = true;
+  } else {
+    properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/assume-role");
+  }
   properties[PROPERTY_FS_CLOUD_PROVIDER] = std::string("gcp");
   properties[PROPERTY_FS_ADDRESS] = std::string("storage.googleapis.com");
   properties[PROPERTY_FS_USE_SSL] = true;
   properties[PROPERTY_FS_BUCKET_NAME] = std::string("bucket");
   properties[PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT] = std::string("reader@example.iam.gserviceaccount.com");
   nlohmann::json descriptor;
-  CaptureRequest(properties, "gcp", "gcs://bucket/key", Operation::ImplicitStat, descriptor);
+  CaptureRequest(properties, "gcp", "gcs://bucket/key", Operation::ImplicitStat, descriptor, nullptr,
+                 use_worker_broker);
   ASSERT_FALSE(descriptor.empty());
+  EXPECT_EQ(descriptor["url"], use_worker_broker ? "" : "https://broker/assume-role");
   EXPECT_EQ(descriptor["request"]["csp"], "gcp");
   EXPECT_EQ(descriptor["request"]["gcpServiceAccountEmail"], "reader@example.iam.gserviceaccount.com");
+  EXPECT_FALSE(descriptor["request"].contains("credentialType"));
   EXPECT_EQ(descriptor["origin"]["endpoint"], "https://storage.googleapis.com");
 }
 
+INSTANTIATE_TEST_SUITE_P(BrokerUrl, TalonGcpBrokerRequestTest, ::testing::Bool());
+
+enum class TalonBrokerSource { None, Endpoint, Worker };
+
 class TalonBrokerOperationTest : public TalonBrokerRequestTest,
-                                 public ::testing::WithParamInterface<std::tuple<int, bool, bool>> {};
+                                 public ::testing::WithParamInterface<std::tuple<int, bool, TalonBrokerSource>> {};
 
 TEST_P(TalonBrokerOperationTest, OptionalNamespaceAndBrokerReachEveryOperation) {
-  const auto [operation, with_namespace, with_broker] = GetParam();
+  const auto [operation, with_namespace, broker_source] = GetParam();
+  const bool with_broker = broker_source != TalonBrokerSource::None;
+  const bool use_worker_broker = broker_source == TalonBrokerSource::Worker;
   api::Properties properties;
   if (with_namespace)
     properties["fs.talon.namespace"] = std::string("tenant-a");
-  if (with_broker) {
+  if (broker_source == TalonBrokerSource::Endpoint) {
     properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/assume-role");
+  } else if (use_worker_broker) {
+    properties[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+    properties[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(TalonMode::Full);
+    properties[PROPERTY_FS_USE_IAM] = true;
+  }
+  if (with_broker) {
     properties[PROPERTY_FS_ADDRESS] = std::string("https://s3.us-west-2.amazonaws.com");
     properties[PROPERTY_FS_REGION] = std::string("us-west-2");
     properties[PROPERTY_FS_BUCKET_NAME] = std::string("bucket");
     properties[PROPERTY_FS_ROLE_ARN] = std::string("arn:aws:iam::123456789012:role/reader");
+    properties[PROPERTY_FS_EXTERNAL_ID] = std::string("tenant-reader");
   }
   const Operation operations[] = {Operation::Stat, Operation::ImplicitStat, Operation::Read, Operation::Load,
                                   Operation::BatchLoad};
   nlohmann::json descriptor;
-  CaptureRequest(properties, "aws", "s3://bucket/key", operations[operation], descriptor);
+  CaptureRequest(properties, "aws", "s3://bucket/key", operations[operation], descriptor, nullptr, use_worker_broker);
   if (with_broker) {
     ASSERT_FALSE(descriptor.empty());
-    EXPECT_EQ(descriptor["url"], "https://broker/assume-role");
+    EXPECT_EQ(descriptor["url"], use_worker_broker ? "" : "https://broker/assume-role");
     EXPECT_EQ(descriptor["request"]["roleArn"], "arn:aws:iam::123456789012:role/reader");
+    EXPECT_EQ(descriptor["request"]["externalId"], "tenant-reader");
+    EXPECT_FALSE(descriptor["request"].contains("credentialType"));
   } else {
     EXPECT_TRUE(descriptor.empty());
   }
@@ -466,7 +500,48 @@ TEST_P(TalonBrokerOperationTest, OptionalNamespaceAndBrokerReachEveryOperation) 
 
 INSTANTIATE_TEST_SUITE_P(OptionalRequestOptions,
                          TalonBrokerOperationTest,
-                         ::testing::Combine(::testing::Range(0, 5), ::testing::Bool(), ::testing::Bool()));
+                         ::testing::Combine(::testing::Range(0, 5),
+                                            ::testing::Bool(),
+                                            ::testing::Values(TalonBrokerSource::None,
+                                                              TalonBrokerSource::Endpoint,
+                                                              TalonBrokerSource::Worker)));
+
+class TalonWorkerBrokerRoleTest
+    : public TalonBrokerRequestTest,
+      public ::testing::WithParamInterface<std::tuple<const char*, const char*, const char*>> {};
+
+TEST_P(TalonWorkerBrokerRoleTest, ForwardsSupportedTargetRoles) {
+  const auto [provider, csp, role] = GetParam();
+  api::Properties properties;
+  properties[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+  properties[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(TalonMode::Full);
+  properties[PROPERTY_FS_CLOUD_PROVIDER] = std::string(provider);
+  properties[PROPERTY_FS_USE_IAM] = true;
+  properties[PROPERTY_FS_ADDRESS] = std::string("https://storage.example");
+  properties[PROPERTY_FS_REGION] = std::string("test-region");
+  properties[PROPERTY_FS_BUCKET_NAME] = std::string("bucket");
+  properties[PROPERTY_FS_ROLE_ARN] = std::string(role);
+  const auto uri = std::string(csp ? csp : "s3") + "://bucket/key";
+  nlohmann::json descriptor;
+  CaptureRequest(properties, provider, uri, Operation::ImplicitStat, descriptor, nullptr, csp != nullptr);
+  if (csp == nullptr) {
+    EXPECT_TRUE(descriptor.empty());
+    return;
+  }
+  ASSERT_FALSE(descriptor.empty());
+  EXPECT_EQ(descriptor["url"], "");
+  EXPECT_EQ(descriptor["request"]["csp"], csp);
+  EXPECT_EQ(descriptor["request"]["roleArn"], role);
+  EXPECT_FALSE(descriptor["request"].contains("credentialType"));
+  EXPECT_FALSE(descriptor["request"].contains("externalId"));
+  EXPECT_EQ(descriptor["origin"]["use_virtual_host"], true);
+}
+
+INSTANTIATE_TEST_SUITE_P(S3CompatibleClouds,
+                         TalonWorkerBrokerRoleTest,
+                         ::testing::Values(std::make_tuple("aliyun", "ali", "acs:ram::123456789012:role/reader"),
+                                           std::make_tuple("tencent", "tc", "qcs::cam::uin/123456:roleName/reader"),
+                                           std::make_tuple("huawei", nullptr, "huawei-reader")));
 
 TEST(TalonRawBridgeTest, RejectsInvalidNamespaceWithoutRequiringBroker) {
   api::Properties properties;
@@ -779,14 +854,14 @@ TEST_P(TalonBrokerIamTest, UseIamSelectsBrokerIdentityAndOmitsTargetFields) {
   } else if (std::string(provider) == "aliyun") {
     properties[PROPERTY_FS_ADDRESS] = std::string("s3.oss-cn-hangzhou.aliyuncs.com");
     properties[PROPERTY_FS_REGION] = std::string("cn-hangzhou");
-    uri = "s3://bucket/key";
+    uri = "ali://bucket/key";
     expected_csp = "ali";
     expected_endpoint = "https://s3.oss-cn-hangzhou.aliyuncs.com";
     expected_virtual_host = true;
   } else if (std::string(provider) == "tencent") {
     properties[PROPERTY_FS_ADDRESS] = std::string("cos.ap-beijing.myqcloud.com");
     properties[PROPERTY_FS_REGION] = std::string("ap-beijing");
-    uri = "s3://bucket/key";
+    uri = "tc://bucket/key";
     expected_csp = "tc";
     expected_endpoint = "https://cos.ap-beijing.myqcloud.com";
     expected_virtual_host = true;
@@ -858,8 +933,7 @@ TEST(TalonRawBridgeTest, UseIamSelectsBrokerMode) {
     }
     config.use_iam = false;
     config.role_arn = "arn:aws:iam::123456789012:role/reader";
-    // Non-IAM support remains unchanged.
-    EXPECT_EQ(talon::TalonClient::Make(config).ok(), config.cloud_provider == kCloudProviderAWS);
+    EXPECT_TRUE(talon::TalonClient::Make(config).ok());
   }
 }
 
@@ -889,6 +963,8 @@ TEST(TalonRawBridgeTest, AzureBrokerIamValidatesActiveRequestConfiguration) {
 
 TEST_F(TalonBrokerRequestTest, UseIamWithoutBrokerEndpointKeepsStaticRequests) {
   api::Properties properties;
+  properties[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+  properties[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(TalonMode::Full);
   properties[PROPERTY_FS_USE_IAM] = true;
   nlohmann::json descriptor;
   CaptureRequest(properties, "aws", "s3://bucket/key", Operation::Stat, descriptor);
@@ -2162,7 +2238,7 @@ TEST_F(TalonFileSystemServiceFreeTest, NamespaceIsolatesFilesystemIdentityWithou
   EXPECT_FALSE(tenant_a->Equals(*unset_namespace));
 }
 
-TEST_F(TalonFileSystemServiceFreeTest, BrokerEndpointsDoNotShareFilesystemIdentity) {
+TEST_F(TalonFileSystemServiceFreeTest, BrokerConfigurationsDoNotShareFilesystemIdentity) {
   auto config = Config();
   config.credential_endpoint = "https://broker/assume-role";
   config.region = "us-west-2";
@@ -2173,6 +2249,18 @@ TEST_F(TalonFileSystemServiceFreeTest, BrokerEndpointsDoNotShareFilesystemIdenti
   config.credential_endpoint = "https://other-broker/assume-role";
   ASSERT_AND_ASSIGN(auto second, Wrap(config, origin));
   EXPECT_FALSE(first->Equals(*second));
+
+  config.credential_endpoint.clear();
+  ASSERT_AND_ASSIGN(auto worker_broker, Wrap(config, origin));
+  EXPECT_FALSE(first->Equals(*worker_broker));
+  config.external_id = "another-tenant";
+  ASSERT_AND_ASSIGN(auto different_target, Wrap(config, origin));
+  EXPECT_FALSE(worker_broker->Equals(*different_target));
+  const auto broker_key = config.GetCacheKey();
+  config.use_iam = true;
+  ASSERT_AND_ASSIGN(auto role_with_iam, Wrap(config, origin));
+  EXPECT_EQ(broker_key, config.GetCacheKey());
+  EXPECT_TRUE(different_target->Equals(*role_with_iam));
 }
 
 TEST_F(TalonFileSystemServiceFreeTest, OpenWithFileInfoRejectsNonFiles) {

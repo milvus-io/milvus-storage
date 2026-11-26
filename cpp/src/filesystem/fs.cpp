@@ -59,15 +59,18 @@ static std::map<std::string, CloudProviderType> CloudProviderType_Map = {
     {kCloudProviderTencent, CloudProviderType::TENCENTCLOUD},
     {kCloudProviderHuawei, CloudProviderType::HUAWEICLOUD}};
 
-bool ArrowFileSystemConfig::IsAzureCredentialBrokerEnabled() const {
-  return cloud_provider == kCloudProviderAzure &&
-         (!GetCredentialEndpoint().empty() || (!use_iam && (!azure_client_id.empty() || !azure_tenant_id.empty())));
+bool ArrowFileSystemConfig::IsAzureCredentialBrokerEnabled(const bool include_iam) const {
+  return (include_iam || !UsesBrokerIam()) && cloud_provider == kCloudProviderAzure && !GetCredentialEndpoint().empty();
 }
 
-bool ArrowFileSystemConfig::IsAwsCredentialBrokerEnabled() const {
-  return !credential_endpoint.empty() &&
+bool ArrowFileSystemConfig::IsAwsCredentialBrokerEnabled(const bool include_iam) const {
+  return (include_iam || !use_iam) && !credential_endpoint.empty() &&
          (cloud_provider == kCloudProviderAWS || cloud_provider == kCloudProviderAliyun ||
-          cloud_provider == kCloudProviderTencent || (!use_iam && cloud_provider == kCloudProviderHuawei));
+          cloud_provider == kCloudProviderTencent);
+}
+
+bool ArrowFileSystemConfig::IsGcpCredentialBrokerEnabled(const bool include_iam) const {
+  return (include_iam || !use_iam) && cloud_provider == kCloudProviderGCP && !credential_endpoint.empty();
 }
 
 std::string ArrowFileSystemConfig::GetCacheKey() const {
@@ -439,7 +442,10 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
     }
   }
 
-  if (result.IsAzureCredentialBrokerEnabled()) {
+  // Validate partial target configurations even when the Broker endpoint is missing.
+  const bool has_azure_target_fields = result.cloud_provider == kCloudProviderAzure && !result.use_iam &&
+                                       (!result.azure_client_id.empty() || !result.azure_tenant_id.empty());
+  if (result.IsAzureCredentialBrokerEnabled() || has_azure_target_fields) {
     if (result.GetCredentialEndpoint().empty() || result.access_key_id.empty() || result.bucket_name.empty() ||
         result.request_timeout_ms <= 0) {
       return arrow::Status::Invalid(
@@ -462,7 +468,7 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
       return arrow::Status::Invalid("fs.credential_endpoint must be a valid HTTP(S) URL");
     }
   }
-  if (result.cloud_provider == kCloudProviderGCP && !result.credential_endpoint.empty()) {
+  if (result.IsGcpCredentialBrokerEnabled()) {
     if (result.bucket_name.empty() || result.request_timeout_ms <= 0) {
       return arrow::Status::Invalid(
           "GCP credential broker mode requires fs.bucket_name and a positive fs.request_timeout_ms");

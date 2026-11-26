@@ -95,13 +95,13 @@ pub struct TalonObjectReader {
     stat: Arc<OnceCell<ObjectStat>>,
 }
 
-// Static requests retain deployment-configured origins. Broker requests carry
-// their own origin and credential scope; GCP then uses Talon's bearer-token backend.
+// Broker requests use the provider-specific backends. Static requests retain
+// the legacy S3-compatible routing for existing worker deployments.
 fn talon_uri(provider: &str, bucket: &str, key: &str, broker_credentials: bool) -> Result<String> {
     let scheme = match provider {
+        "aliyun" if broker_credentials => "ali",
+        "tencent" if broker_credentials => "tc",
         "gcp" if broker_credentials => "gcs",
-        // Milvus accesses these providers through their S3-compatible APIs, so
-        // the corresponding Talon deployment must use its S3 backend as well.
         "aws" | "aliyun" | "tencent" | "huawei" | "gcp" | "volcengine" => "s3",
         "azure" => "az",
         value => bail!("Talon does not support cloud provider {value:?}"),
@@ -974,6 +974,12 @@ mod tests {
             assert_eq!(
                 talon_uri(provider, "bucket", "path/a", false).unwrap(),
                 "s3://bucket/path/a"
+            );
+        }
+        for (provider, scheme) in [("aliyun", "ali"), ("tencent", "tc"), ("gcp", "gcs")] {
+            assert_eq!(
+                talon_uri(provider, "bucket", "path/a", true).unwrap(),
+                format!("{scheme}://bucket/path/a")
             );
         }
         assert_eq!(
