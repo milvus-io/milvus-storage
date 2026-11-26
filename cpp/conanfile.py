@@ -163,7 +163,7 @@ class StorageConan(ConanFile):
         self.requires("xz_utils/5.4.5#fc4e36861e0a47ecd4a40a00e6d29ac8")
         self.requires("glog/0.7.1#a306e61d7b8311db8cb148ad62c48030")
         self.requires("zstd/1.5.5#70dc5eb8ea16708fc946fbac884c507e")
-        self.requires("fmt/11.2.0#eb98daa559c7c59d591f4720dde4cd5c", force=True)
+        self.requires("fmt/11.2.0#9e6db8ce0c09fbec6b24e461cf520c53", force=True)
         self.requires("prometheus-cpp/1.2.4#0918d66c13f97acb7809759f9de49b3f")
         self.requires("gflags/2.2.2#7671803f1dc19354cc90bd32874dcfda")
         self.requires("boost/1.83.0#4e8a94ac1b88312af95eded83cd81ca8", force=True)
@@ -171,7 +171,12 @@ class StorageConan(ConanFile):
         self.requires("openssl/3.3.2#9f9f130d58e7c13e76bb8a559f0a6a8b", force=True, override=True)
         self.requires("zlib/1.3.1#8045430172a5f8d56ba001b14561b4ea")
         self.requires("libcurl/8.10.1#a3113369c86086b0e84231844e7ed0a9", force=True, override=True)
-        self.requires("folly/2026.04.20.00@milvus/dev#06852bea5b6449f0c4eb0df002b5779c")
+        # folly recipe revision with the upstream fix backported by
+        # milvus-io/conanfiles#252 (facebook/folly 97d5b31d): folly/result/
+        # epitaph.{h,cpp} were missing <algorithm>/<vector>, rejected by the
+        # libc++ shipped with clang-23 (see zilliztech/milvus-common#155).
+        # force=True keeps the whole graph on this fixed revision.
+        self.requires("folly/2026.04.20.00@milvus/dev#bb88f7ffd53457e8fa8f4516eaec6c60", force=True)
         self.requires("libavrocpp/1.12.1.1@milvus/dev#b4854183542196740ec9a004fdfff7ec")
         self.requires("google-cloud-cpp/2.28.0@milvus/dev#468918b43cec43624531a0340398cf43")
         self.requires("opentelemetry-cpp/1.23.0@milvus/dev#11bc565ec6e82910ae8f7471da756720")
