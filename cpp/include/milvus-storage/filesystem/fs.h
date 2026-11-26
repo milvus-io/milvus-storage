@@ -249,16 +249,17 @@ struct ArrowFileSystemConfig {
   // Broker's own identity; otherwise the supplied target identity is used.
   // True indicates supported Broker authentication for that cloud and mode.
   //
-  // Cloud provider | IAM Broker API | Non-IAM Broker API (native)
-  // ---------------+----------------+----------------------------
-  // aws            | True           | True
-  // aliyun         | True           | True
-  // tencent        | True           | True
-  // huawei         | False          | False
-  // volcengine     | False          | False
-  // gcp            | True           | True
-  // azure          | True           | True
-  // Talon uses the same cloud-specific Broker contracts.
+  // Cloud provider | IAM Broker API | Non-IAM Broker API (native) | Non-IAM Broker API (Talon)
+  // ---------------+----------------+-----------------------------+---------------------------
+  // aws            | True           | True                        | True
+  // aliyun         | True           | True                        | False
+  // tencent        | True           | True                        | False
+  // huawei         | False          | False                       | False
+  // volcengine     | False          | False                       | False
+  // gcp            | True           | True                        | True
+  // azure          | True           | True                        | True
+  // The Talon column describes worker-side exchange support. Storage can
+  // encode Aliyun and Tencent target-role requests.
   std::string credential_endpoint = "";
 
   // Azure broker-backed temporary SAS authentication.
