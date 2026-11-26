@@ -295,6 +295,16 @@ class StorageConan(ConanFile):
         cmake.build()
 
     def package(self):
+        # milvus-common is embedded via FetchContent (cpp/cmake/libmilvus-common.cmake),
+        # so its install rules (install(TARGETS milvus-common) + install(DIRECTORY include/))
+        # are honored here alongside the storage install rules. The published storage
+        # package therefore ships libmilvus-common.so and milvus-common's headers in
+        # addition to libmilvus-storage.so. This is an explicit, intended packaging
+        # change: consumers such as the Milvus server that already provide their own
+        # milvus-common package must not ALSO install this one, or two copies of
+        # libmilvus-common.so can end up on the runtime path and silently load the
+        # wrong one once the pins diverge. If this embedding becomes undesirable,
+        # guard milvus-common's install rules instead of relying on the subproject's.
         cmake = CMake(self)
         cmake.install()
         copy(self, "*_c.h", src=self.source_folder, dst=os.path.join(self.package_folder, "include"))

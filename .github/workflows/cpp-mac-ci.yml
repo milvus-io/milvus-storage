@@ -4,11 +4,17 @@ on:
   push:
     paths:
       - 'cpp/conanfile.py'
+      - 'cpp/CMakeLists.txt'
+      - 'cpp/cmake/**'
+      - 'cpp/src/**'
       - '.github/workflows/cpp-ci.yml'
       - '.github/workflows/cpp-mac-ci.yml'
   pull_request:
     paths:
       - 'cpp/conanfile.py'
+      - 'cpp/CMakeLists.txt'
+      - 'cpp/cmake/**'
+      - 'cpp/src/**'
       - '.github/workflows/cpp-ci.yml'
       - '.github/workflows/cpp-mac-ci.yml'
 

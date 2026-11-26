@@ -16,6 +16,13 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable( milvus-common )
 
+# milvus-common's own CMakeLists never declares nlohmann_json even though
+# src/common/Tracer.cpp #includes it unconditionally; without this declaration
+# the source build resolves nlohmann/json.hpp from whatever system header is
+# present instead of the pinned nlohmann_json in the Conan graph. Link it here
+# so the embedded build compiles against the pinned package.
+target_link_libraries(milvus-common PUBLIC nlohmann_json::nlohmann_json)
+
 # libatomic is a separate library only on Linux (needed for 64-bit atomics on
 # some architectures with GCC). On macOS, atomic operations are part of the
 # standard library.
