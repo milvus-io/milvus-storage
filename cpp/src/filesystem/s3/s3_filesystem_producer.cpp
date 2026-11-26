@@ -48,6 +48,7 @@
 #include "milvus-storage/filesystem/s3/provider/AwsCredentialBrokerProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudSTSClient.h"
+#include "milvus-storage/filesystem/s3/provider/TencentCloudOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
@@ -199,7 +200,7 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
 arrow::Status S3FileSystemProducer::ConfigureCredentials(S3Options& options) {
   // Credential configuration priority:
   // 1. Shared credential broker for S3/S3-compatible providers, when configured
-  // 2. AssumeRole (role_arn) — AWS (AssumeRole) or Aliyun (AssumeRoleWithOIDC)
+  // 2. AssumeRole (role_arn) — AWS (AssumeRole), Aliyun (OIDC or RAM chain) or Tencent (TKE OIDC chain)
   // 3. IAM — use provider-specific STS credential providers
   // 4. Explicit access key / secret key
   if (config_.IsAwsCredentialBrokerEnabled()) {
@@ -253,6 +254,17 @@ arrow::Status S3FileSystemProducer::ConfigureAssumeRoleCredentials(S3Options& op
                                            config_.load_frequency, sts_client);
   } else if (config_.cloud_provider == kCloudProviderAliyun) {
     return ConfigureAliyunAssumeRoleCredentials(options);
+  } else if (config_.cloud_provider == kCloudProviderTencent) {
+    if (Aws::Environment::GetEnv("TKE_REGION").empty() || Aws::Environment::GetEnv("TKE_ROLE_ARN").empty() ||
+        Aws::Environment::GetEnv("TKE_WEB_IDENTITY_TOKEN_FILE").empty() ||
+        Aws::Environment::GetEnv("TKE_PROVIDER_ID").empty()) {
+      return arrow::Status::Invalid(
+          "Tencent role_arn requires TKE_REGION, TKE_ROLE_ARN, "
+          "TKE_WEB_IDENTITY_TOKEN_FILE and TKE_PROVIDER_ID in process environment");
+    }
+    options.credentials_provider = Aws::MakeShared<TencentCloudOIDCAssumeRoleChainProvider>(
+        "TencentCloudOIDCAssumeRoleChainProvider", config_.role_arn, config_.session_name, config_.external_id);
+    options.credentials_kind = S3CredentialsKind::WebIdentity;
   } else {
     return arrow::Status::Invalid("role_arn not supported for cloud provider: ", config_.cloud_provider);
   }
