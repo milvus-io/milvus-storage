@@ -795,15 +795,25 @@ class ScopedEnv final {
 
 }  // namespace
 
-class TalonAzureBrokerRequestTest : public TalonBrokerRequestTest, public ::testing::WithParamInterface<bool> {};
+enum class AzureBrokerEndpoint { None, Canonical, Legacy };
 
-TEST_P(TalonAzureBrokerRequestTest, AzureDescriptorExpandsAccountAndCloudSuffix) {
+class TalonAzureBrokerRequestTest : public TalonBrokerRequestTest,
+                                    public ::testing::WithParamInterface<AzureBrokerEndpoint> {};
+
+TEST_P(TalonAzureBrokerRequestTest, AzureDescriptorRequiresExplicitEndpoint) {
   ScopedEnv azurite("USE_AZURITE", nullptr);
   api::Properties properties;
-  const bool legacy = GetParam();
-  properties[legacy ? PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT : PROPERTY_FS_CREDENTIAL_ENDPOINT] =
-      std::string("https://broker/assume-role");
-  properties[PROPERTY_FS_USE_IAM] = legacy;
+  const auto endpoint = GetParam();
+  if (endpoint == AzureBrokerEndpoint::None) {
+    properties[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+    properties[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(TalonMode::Full);
+    properties[PROPERTY_FS_USE_IAM] = true;
+  } else {
+    const bool legacy = endpoint == AzureBrokerEndpoint::Legacy;
+    properties[legacy ? PROPERTY_FS_AZURE_CREDENTIAL_ENDPOINT : PROPERTY_FS_CREDENTIAL_ENDPOINT] =
+        std::string("https://broker/assume-role");
+    properties[PROPERTY_FS_USE_IAM] = legacy;
+  }
   properties[PROPERTY_FS_CLOUD_PROVIDER] = std::string("azure");
   properties[PROPERTY_FS_ADDRESS] = std::string("core.windows.net");
   properties[PROPERTY_FS_USE_SSL] = true;
@@ -814,6 +824,11 @@ TEST_P(TalonAzureBrokerRequestTest, AzureDescriptorExpandsAccountAndCloudSuffix)
   properties[PROPERTY_FS_AZURE_TENANT_ID] = std::string("tenant");
   nlohmann::json descriptor;
   CaptureRequest(properties, "azure", "az://bucket/key", Operation::Stat, descriptor);
+  if (endpoint == AzureBrokerEndpoint::None) {
+    EXPECT_TRUE(descriptor.empty());
+    return;
+  }
+  ASSERT_FALSE(descriptor.empty());
   EXPECT_EQ(descriptor.at("url"), "https://broker/assume-role");
   EXPECT_EQ(descriptor["request"], (nlohmann::json{{"csp", "azure"},
                                                    {"region", "westus3"},
@@ -826,7 +841,11 @@ TEST_P(TalonAzureBrokerRequestTest, AzureDescriptorExpandsAccountAndCloudSuffix)
   EXPECT_EQ(descriptor["origin"]["use_virtual_host"], true);
 }
 
-INSTANTIATE_TEST_SUITE_P(EndpointKeys, TalonAzureBrokerRequestTest, ::testing::Bool());
+INSTANTIATE_TEST_SUITE_P(EndpointKeys,
+                         TalonAzureBrokerRequestTest,
+                         ::testing::Values(AzureBrokerEndpoint::None,
+                                           AzureBrokerEndpoint::Canonical,
+                                           AzureBrokerEndpoint::Legacy));
 
 class TalonBrokerIamTest : public TalonBrokerRequestTest,
                            public ::testing::WithParamInterface<std::tuple<const char*, bool, bool>> {};

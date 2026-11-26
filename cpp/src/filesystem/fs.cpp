@@ -427,30 +427,11 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
       (result.talon_small_read_threshold == 0 || result.talon_small_read_threshold > 1024U * 1024U)) {
     return arrow::Status::Invalid("fs.talon.small_read_threshold must be between 1 and 1048576 bytes");
   }
-  if (result.talon_mode != TalonMode::Disabled) {
-    if (result.storage_type != "remote") {
-      return arrow::Status::Invalid("Talon requires fs.storage_type=remote");
-    }
-    if (result.talon_coordinator.empty()) {
-      return arrow::Status::Invalid("fs.talon.mode=", talon_mode, " requires fs.talon.coordinator");
-    }
-    if (result.talon_block_size == 0) {
-      return arrow::Status::Invalid("fs.talon.block_size must be greater than zero");
-    }
-    if (result.talon_max_idle_per_addr == 0) {
-      return arrow::Status::Invalid("fs.talon.max_idle_per_addr must be greater than zero");
-    }
-  }
-
-  // Validate partial target configurations even when the Broker endpoint is missing.
-  const bool has_azure_target_fields = result.cloud_provider == kCloudProviderAzure && !result.use_iam &&
-                                       (!result.azure_client_id.empty() || !result.azure_tenant_id.empty());
-  if (result.IsAzureCredentialBrokerEnabled() || has_azure_target_fields) {
-    if (result.GetCredentialEndpoint().empty() || result.access_key_id.empty() || result.bucket_name.empty() ||
-        result.request_timeout_ms <= 0) {
+  if (result.IsAzureCredentialBrokerEnabled()) {
+    if (result.access_key_id.empty() || result.bucket_name.empty() || result.request_timeout_ms <= 0) {
       return arrow::Status::Invalid(
-          "Azure credential broker mode requires fs.credential_endpoint, fs.access_key_id, fs.bucket_name, "
-          "and a positive fs.request_timeout_ms");
+          "Azure credential broker mode requires fs.access_key_id, fs.bucket_name, and a positive "
+          "fs.request_timeout_ms");
     }
     if (result.UsesBrokerIam()) {
       if (result.load_frequency < 900 || result.load_frequency > 3600) {
@@ -468,6 +449,7 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
       return arrow::Status::Invalid("fs.credential_endpoint must be a valid HTTP(S) URL");
     }
   }
+
   if (result.IsGcpCredentialBrokerEnabled()) {
     if (result.bucket_name.empty() || result.request_timeout_ms <= 0) {
       return arrow::Status::Invalid(
@@ -483,6 +465,22 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
       return arrow::Status::Invalid("fs.credential_endpoint must be a valid HTTP(S) URL");
     }
   }
+
+  if (result.talon_mode != TalonMode::Disabled) {
+    if (result.storage_type != "remote") {
+      return arrow::Status::Invalid("Talon requires fs.storage_type=remote");
+    }
+    if (result.talon_coordinator.empty()) {
+      return arrow::Status::Invalid("fs.talon.mode=", talon_mode, " requires fs.talon.coordinator");
+    }
+    if (result.talon_block_size == 0) {
+      return arrow::Status::Invalid("fs.talon.block_size must be greater than zero");
+    }
+    if (result.talon_max_idle_per_addr == 0) {
+      return arrow::Status::Invalid("fs.talon.max_idle_per_addr must be greater than zero");
+    }
+  }
+
   return arrow::Status::OK();
 }
 

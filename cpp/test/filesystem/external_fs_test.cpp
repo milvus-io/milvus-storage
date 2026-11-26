@@ -438,18 +438,18 @@ TEST_F(ExternalFilesystemTest, AzureCredentialBrokerConfigValidation) {
   non_azure_config.cloud_provider = kCloudProviderAWS;
   EXPECT_FALSE(non_azure_config.IsAzureCredentialBrokerEnabled());
 
-  auto no_endpoint_config = *config_result;
-  no_endpoint_config.credential_endpoint.clear();
-  EXPECT_FALSE(no_endpoint_config.IsAzureCredentialBrokerEnabled());
-  for (const auto* key : {PROPERTY_FS_AZURE_CLIENT_ID, PROPERTY_FS_AZURE_TENANT_ID}) {
-    SCOPED_TRACE(key);
-    auto missing_endpoint = props;
-    missing_endpoint.erase(PROPERTY_FS_CREDENTIAL_ENDPOINT);
-    missing_endpoint.erase(key);
-    const auto result = FilesystemCache::resolve_config(missing_endpoint);
-    ASSERT_TRUE(result.status().IsInvalid());
-    EXPECT_NE(result.status().message().find(PROPERTY_FS_CREDENTIAL_ENDPOINT), std::string::npos);
-  }
+  auto native_props = props;
+  native_props.erase(PROPERTY_FS_CREDENTIAL_ENDPOINT);
+  native_props[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(TalonMode::Full);
+  native_props[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
+  native_props[PROPERTY_FS_USE_IAM] = true;
+  const auto native_config = FilesystemCache::resolve_config(native_props);
+  ASSERT_TRUE(native_config.ok()) << native_config.status();
+  EXPECT_FALSE(native_config->IsAzureCredentialBrokerEnabled());
+  auto other_target = *native_config;
+  other_target.azure_client_id = "other-client";
+  other_target.azure_tenant_id = "other-tenant";
+  EXPECT_EQ(native_config->GetCacheKey(), other_target.GetCacheKey());
 
   auto partial = props;
   partial.erase(PROPERTY_FS_AZURE_TENANT_ID);

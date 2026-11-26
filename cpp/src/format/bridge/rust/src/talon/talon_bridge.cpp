@@ -217,8 +217,8 @@ void TalonIoCallbackImpl(void* context, int32_t error_code, uint64_t value, cons
 
 bool ShouldTalonUseCredentialBroker(const ArrowFileSystemConfig& config) {
   // Forward target roles from native OIDC on AWS, Aliyun, and Tencent, and
-  // target service accounts from GCP impersonation. The Talon worker uses
-  // its configured Broker URL.
+  // target service accounts from GCP impersonation.
+  // The Talon worker uses its configured Broker URL.
   if (config.GetCredentialEndpoint().empty()) {
     if (config.talon_mode == TalonMode::Disabled) {
       return false;
@@ -231,6 +231,8 @@ bool ShouldTalonUseCredentialBroker(const ArrowFileSystemConfig& config) {
            (config.cloud_provider == kCloudProviderAWS || config.cloud_provider == kCloudProviderAliyun ||
             config.cloud_provider == kCloudProviderTencent);
   }
+  // Azure external tables use SAS. Their non-IAM Broker descriptor requires
+  // an explicit fs.credential_endpoint or fs.azure_credential_endpoint.
   return config.IsAzureCredentialBrokerEnabled(/*include_iam=*/false) ||
          config.IsAwsCredentialBrokerEnabled(/*include_iam=*/false) ||
          config.IsGcpCredentialBrokerEnabled(/*include_iam=*/false);
@@ -304,6 +306,7 @@ arrow::Result<std::string> TalonClient::BuildCredentialBrokerARNJson(const Arrow
   request[credential_broker::kDurationSeconds] = config.load_frequency;
   std::string endpoint = config.address;
   bool use_virtual_host = config.use_virtual_host;
+  const bool use_worker_broker = config.GetCredentialEndpoint().empty();
   if (config.IsAzureCredentialBrokerEnabled(/*include_iam=*/false)) {
     if (config.access_key_id.empty()) {
       return arrow::Status::Invalid("Talon Azure Broker requires fs.access_key_id");
@@ -323,13 +326,13 @@ arrow::Result<std::string> TalonClient::BuildCredentialBrokerARNJson(const Arrow
       endpoint = config.access_key_id + ".blob." + (endpoint.empty() ? "core.windows.net" : endpoint);
     }
   } else if (config.IsGcpCredentialBrokerEnabled(/*include_iam=*/false) ||
-             (config.GetCredentialEndpoint().empty() && config.cloud_provider == kCloudProviderGCP)) {
+             (use_worker_broker && config.cloud_provider == kCloudProviderGCP)) {
     if (config.gcp_target_service_account.empty()) {
       return arrow::Status::Invalid("Talon GCP Broker stsAssumeRole requires fs.gcp_target_service_account");
     }
     request[credential_broker::kGcpServiceAccountEmail] = config.gcp_target_service_account;
-  } else if (config.IsAwsCredentialBrokerEnabled(/*include_iam=*/false) || config.GetCredentialEndpoint().empty()) {
-    // After the GCP check, Make only selects the empty Broker URL path for supported S3 target roles.
+  } else if (config.IsAwsCredentialBrokerEnabled(/*include_iam=*/false) || use_worker_broker) {
+    // Make only selects the remaining empty Broker URL path for supported S3 target roles.
     if (config.region.empty() || config.load_frequency < 900 || config.load_frequency > 3600) {
       return arrow::Status::Invalid("Talon S3 Broker requires fs.region and fs.load_frequency in [900, 3600]");
     }
