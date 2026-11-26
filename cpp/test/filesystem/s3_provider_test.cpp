@@ -2266,16 +2266,10 @@ TEST_F(S3ProviderTest, AwsBrokerRetriesAfterInitialFailure) {
 }
 
 TEST_F(S3ProviderTest, AwsBrokerDispatcherSelectsBrokerInsteadOfDirectSts) {
-  const std::array<std::pair<const char*, const char*>, 5> clouds = {{{kCloudProviderAWS, "aws"},
-                                                                      {kCloudProviderAliyun, "ali"},
-                                                                      {kCloudProviderTencent, "tc"},
-                                                                      {kCloudProviderHuawei, nullptr},
-                                                                      {kCloudProviderVolcengine, nullptr}}};
-  for (const auto& [cloud, iam_csp] : clouds) {
+  const std::array<std::pair<const char*, const char*>, 3> clouds = {
+      {{kCloudProviderAWS, "aws"}, {kCloudProviderAliyun, "ali"}, {kCloudProviderTencent, "tc"}}};
+  for (const auto& [cloud, csp] : clouds) {
     for (const bool use_iam : {false, true}) {
-      if (use_iam && iam_csp == nullptr) {
-        continue;
-      }
       SCOPED_TRACE(cloud);
       SCOPED_TRACE(use_iam);
       ArrowFileSystemConfig config;
@@ -2303,8 +2297,7 @@ TEST_F(S3ProviderTest, AwsBrokerDispatcherSelectsBrokerInsteadOfDirectSts) {
       EXPECT_EQ(options.credentials_provider->GetAWSCredentials().GetSessionToken(), "broker-session");
       const auto requests = mock_client_->GetRecordedRequests();
       ASSERT_EQ(requests.size(), request_count + (use_iam ? 2 : 1));
-      nlohmann::json expected = {
-          {"csp", iam_csp != nullptr ? iam_csp : "aws"}, {"region", "us-west-2"}, {"durationSeconds", 900}};
+      nlohmann::json expected = {{"csp", csp}, {"region", "us-west-2"}, {"durationSeconds", 900}};
       if (use_iam) {
         expected["credentialType"] = "iam";
       } else {
@@ -2319,7 +2312,7 @@ TEST_F(S3ProviderTest, AwsBrokerDispatcherSelectsBrokerInsteadOfDirectSts) {
       }
     }
   }
-  for (const auto* cloud : {kCloudProviderAzure, kCloudProviderGCP}) {
+  for (const auto* cloud : {kCloudProviderHuawei, kCloudProviderVolcengine, kCloudProviderAzure, kCloudProviderGCP}) {
     SCOPED_TRACE(cloud);
     ArrowFileSystemConfig config;
     config.cloud_provider = cloud;
