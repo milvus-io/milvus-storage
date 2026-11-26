@@ -799,10 +799,19 @@ class ScopedEnv final {
 
 }  // namespace
 
-TEST_F(TalonBrokerRequestTest, AzureDescriptorExpandsAccountAndCloudSuffix) {
+class TalonAzureBrokerRequestTest : public TalonBrokerRequestTest, public ::testing::WithParamInterface<bool> {};
+
+TEST_P(TalonAzureBrokerRequestTest, AzureDescriptorRequiresExplicitEndpoint) {
   ScopedEnv azurite("USE_AZURITE", nullptr);
+  const bool has_endpoint = GetParam();
   api::Properties properties;
-  properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/assume-role");
+  if (has_endpoint) {
+    properties[PROPERTY_FS_CREDENTIAL_ENDPOINT] = std::string("https://broker/assume-role");
+  } else {
+    properties[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+    properties[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(TalonMode::Full);
+    properties[PROPERTY_FS_USE_IAM] = true;
+  }
   properties[PROPERTY_FS_CLOUD_PROVIDER] = std::string("azure");
   properties[PROPERTY_FS_ADDRESS] = std::string("core.windows.net");
   properties[PROPERTY_FS_USE_SSL] = true;
@@ -813,7 +822,12 @@ TEST_F(TalonBrokerRequestTest, AzureDescriptorExpandsAccountAndCloudSuffix) {
   properties[PROPERTY_FS_AZURE_TENANT_ID] = std::string("tenant");
   nlohmann::json descriptor;
   CaptureRequest(properties, "azure", "az://bucket/key", Operation::Stat, descriptor);
+  if (!has_endpoint) {
+    EXPECT_TRUE(descriptor.empty());
+    return;
+  }
   ASSERT_FALSE(descriptor.empty());
+  EXPECT_EQ(descriptor["url"], "https://broker/assume-role");
   EXPECT_EQ(descriptor["request"], (nlohmann::json{{"csp", "azure"},
                                                    {"region", "westus3"},
                                                    {"bucket", "bucket"},
@@ -824,6 +838,8 @@ TEST_F(TalonBrokerRequestTest, AzureDescriptorExpandsAccountAndCloudSuffix) {
   EXPECT_EQ(descriptor["origin"]["endpoint"], "https://account.blob.core.windows.net");
   EXPECT_EQ(descriptor["origin"]["use_virtual_host"], true);
 }
+
+INSTANTIATE_TEST_SUITE_P(BrokerUrl, TalonAzureBrokerRequestTest, ::testing::Bool());
 
 class TalonBrokerIamTest : public TalonBrokerRequestTest,
                            public ::testing::WithParamInterface<std::tuple<const char*, bool, bool>> {};

@@ -93,7 +93,8 @@ class TalonObjectReader final {
 /// An explicit endpoint uses the native Broker provider checks with
 /// include_iam=false. With an empty credential_endpoint, an enabled Talon
 /// filesystem can send a supported S3 role_arn or GCP target service account
-/// and let the worker select the Broker URL.
+/// and let the worker select the Broker URL. Azure target identities require
+/// an explicit credential_endpoint.
 [[nodiscard]] bool ShouldTalonUseCredentialBroker(const ArrowFileSystemConfig& config);
 
 /// Owns a Rust Talon client and converts every fallible FFI operation to Arrow errors.
