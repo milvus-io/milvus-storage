@@ -177,14 +177,14 @@ class StorageConan(ConanFile):
         # libc++ shipped with clang-23 (see zilliztech/milvus-common#155).
         # force=True keeps the whole graph on this fixed revision.
         self.requires("folly/2026.04.20.00@milvus/dev#bb88f7ffd53457e8fa8f4516eaec6c60", force=True)
-        self.requires("libavrocpp/1.12.1.1@milvus/dev#b4854183542196740ec9a004fdfff7ec")
+        self.requires("libavrocpp/1.12.1.1@milvus/dev#2bca5dd2a455467026e5d1a20a3e1997")
         self.requires("google-cloud-cpp/2.28.0@milvus/dev#468918b43cec43624531a0340398cf43")
         self.requires("opentelemetry-cpp/1.23.0@milvus/dev#11bc565ec6e82910ae8f7471da756720")
         self.requires("milvus-common/1.0.0-a88c21f@milvus/dev#0eb9a7f2f5d5fe0e7d37f45f3f9a38ea")
         # azure-sdk-for-cpp is a transitive dep of Arrow, but must be declared
         # as a direct dep so CMakeDeps generates standalone cmake config files.
         # Without this, find_package(Azure) can't find include directories.
-        self.requires("azure-sdk-for-cpp/1.16.4@milvus/dev#7c95e3df67cfea28b3cf6dbd60fbf137", force=True)
+        self.requires("azure-sdk-for-cpp/1.16.4@milvus/dev#f59f3561b92b3ca583202d6d93faa932", force=True)
         self.requires("aws-sdk-cpp/1.11.921@milvus/dev#0b229410d5498d3bacc19ccf57334b30", force=True)
         # Keep the SDK and native CRT consumers on the same dependency graph.
         self.requires("aws-crt-cpp/0.44.3#43f6408847655d35224320f4774bfcb9")
@@ -197,7 +197,7 @@ class StorageConan(ConanFile):
         self.requires("lz4/1.9.4#7f0b5851453198536c14354ee30ca9ae", force=True, override=True)
         if self.options.with_benchmark:
             # don't use 1.7.0 which have core when `--help`.
-            self.requires("benchmark/1.8.3")
+            self.requires("benchmark/1.9.5")
         if self.options.with_ut:
             self.requires("gtest/1.15.0")
         if self.settings.os != "Macos":
