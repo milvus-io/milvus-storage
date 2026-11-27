@@ -19,12 +19,27 @@
 #include <aws/core/Aws.h>
 #include <aws/core/http/curl/CurlHttpClient.h>
 #include <curl/curl.h>
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
+#include <openssl/opensslv.h>
 
 namespace milvus_storage {
+
+inline bool OpenSSLFipsEnabled() {
+#if defined(OPENSSL_VERSION_MAJOR) && OPENSSL_VERSION_MAJOR >= 3
+  return EVP_default_properties_is_fips_enabled(OSSL_LIB_CTX_get0_global_default()) == 1;
+#else
+  return false;
+#endif
+}
 
 // Convert tls_min_version string to CURLOPT_SSLVERSION value.
 // Returns CURL_SSLVERSION_DEFAULT (0) if the version string is empty or unrecognized.
 inline long TlsVersionToCurlOpt(const std::string& tls_min_version) {
+  // An explicit CURLOPT_SSLVERSION replaces the floor from OpenSSL's configuration.
+  if ((tls_min_version == "1.0" || tls_min_version == "1.1") && OpenSSLFipsEnabled()) {
+    return CURL_SSLVERSION_TLSv1_2;
+  }
   if (tls_min_version == "1.0") {
     return CURL_SSLVERSION_TLSv1_0;
   }
