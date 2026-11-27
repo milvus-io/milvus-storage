@@ -21,11 +21,12 @@
 #include <curl/curl.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <openssl/opensslv.h>
 
 namespace milvus_storage {
 
 inline bool OpenSSLFipsEnabled() {
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#if defined(OPENSSL_VERSION_MAJOR) && OPENSSL_VERSION_MAJOR >= 3
   return EVP_default_properties_is_fips_enabled(OSSL_LIB_CTX_get0_global_default()) == 1;
 #else
   return false;
