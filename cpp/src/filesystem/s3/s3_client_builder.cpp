@@ -38,6 +38,7 @@
 #include "milvus-storage/filesystem/s3/s3_client.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
+#include "milvus-storage/filesystem/tls_http_client.h"
 #include "milvus-storage/filesystem/util_internal.h"
 
 using ::arrow::Result;
@@ -143,7 +144,10 @@ arrow::Status ClientBuilderBase::PrepareClientConfig(Aws::Client::ClientConfigur
   }
   if (!arrow::fs::internal::global_options.tls_ca_file_path.empty()) {
     client_config->caFile = ToAwsString(arrow::fs::internal::global_options.tls_ca_file_path);
-    client_config->verifySSL = false;
+    // The legacy CA-file option permits unverified peers in non-FIPS mode.
+    if (!OpenSSLFipsEnabled()) {
+      client_config->verifySSL = false;
+    }
   }
   if (!arrow::fs::internal::global_options.tls_ca_dir_path.empty()) {
     client_config->caPath = ToAwsString(arrow::fs::internal::global_options.tls_ca_dir_path);

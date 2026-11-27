@@ -37,6 +37,7 @@ find_package(Protobuf REQUIRED CONFIG)
 find_package(nlohmann_json REQUIRED CONFIG)
 find_package(opentelemetry-cpp REQUIRED)
 find_package(google-cloud-cpp REQUIRED)
+find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
 find_package(AWSSDK REQUIRED CONFIG)
 find_package(aws-c-io REQUIRED CONFIG)
@@ -103,6 +104,7 @@ list(APPEND LINK_LIBS
   fmt::fmt
   azure-sdk-for-cpp::azure-sdk-for-cpp
   glog::glog
+  OpenSSL::Crypto
   CURL::libcurl
   prometheus-cpp::core
   opentelemetry-cpp::opentelemetry_proto
