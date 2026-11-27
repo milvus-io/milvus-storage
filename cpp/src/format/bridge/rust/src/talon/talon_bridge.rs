@@ -95,14 +95,12 @@ pub struct TalonObjectReader {
     stat: Arc<OnceCell<ObjectStat>>,
 }
 
-// Static requests retain deployment-configured origins. Broker requests carry
-// their own origin and credential scope; GCP then uses Talon's bearer-token backend.
-fn talon_uri(provider: &str, bucket: &str, key: &str, broker_credentials: bool) -> Result<String> {
+fn talon_uri(provider: &str, bucket: &str, key: &str) -> Result<String> {
     let scheme = match provider {
-        "gcp" if broker_credentials => "gcs",
-        // Milvus accesses these providers through their S3-compatible APIs, so
-        // the corresponding Talon deployment must use its S3 backend as well.
-        "aws" | "aliyun" | "tencent" | "huawei" | "gcp" | "volcengine" => "s3",
+        "aliyun" => "ali",
+        "tencent" => "tc",
+        "gcp" => "gcs",
+        "aws" | "huawei" | "volcengine" => "s3",
         "azure" => "az",
         value => bail!("Talon does not support cloud provider {value:?}"),
     };
@@ -179,12 +177,7 @@ pub fn open_talon_object(
     });
     Ok(Box::new(TalonObjectReader {
         client: Arc::clone(&client.inner),
-        object: parse_uri(&talon_uri(
-            cloud_provider,
-            bucket,
-            key,
-            client.inner.credential_broker.is_some(),
-        )?)?,
+        object: parse_uri(&talon_uri(cloud_provider, bucket, key)?)?,
         stat: Arc::new(OnceCell::new_with(initial_stat)),
     }))
 }
@@ -970,17 +963,24 @@ mod tests {
 
     #[test]
     fn maps_storage_providers_to_canonical_talon_uris() {
-        for provider in ["aws", "aliyun", "tencent", "huawei", "gcp", "volcengine"] {
+        for (provider, scheme) in [
+            ("aws", "s3"),
+            ("aliyun", "ali"),
+            ("tencent", "tc"),
+            ("huawei", "s3"),
+            ("gcp", "gcs"),
+            ("volcengine", "s3"),
+        ] {
             assert_eq!(
-                talon_uri(provider, "bucket", "path/a", false).unwrap(),
-                "s3://bucket/path/a"
+                talon_uri(provider, "bucket", "path/a").unwrap(),
+                format!("{scheme}://bucket/path/a")
             );
         }
         assert_eq!(
-            talon_uri("azure", "container", "path/a", false).unwrap(),
+            talon_uri("azure", "container", "path/a").unwrap(),
             "az://container/path/a"
         );
-        assert!(talon_uri("local", "bucket", "path/a", false).is_err());
+        assert!(talon_uri("local", "bucket", "path/a").is_err());
     }
 
     #[test]

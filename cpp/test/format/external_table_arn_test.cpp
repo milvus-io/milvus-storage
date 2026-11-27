@@ -1069,9 +1069,7 @@ INSTANTIATE_TEST_SUITE_P(AzureArnFormats,
 
 // ===========================================================================
 // External-table reads through an S3-compatible temporary-credential broker.
-// The cloud provider is supplied by the environment (e.g. aws, aliyun, tencent,
-// huawei, volcengine); the fixture does not restrict it to AWS. The configured
-// storage provider and broker must support the requested AssumeRole contract.
+// The cloud provider is supplied by the environment (aws, aliyun, or tencent).
 // Setup credentials are used only to prepare/clean up data. Manifest storage is local.
 // ===========================================================================
 #define S3_BROKER_ENV_CLOUD_PROVIDER "S3_BROKER_TEST_ENV_CLOUD_PROVIDER"
@@ -1107,20 +1105,21 @@ class ExternalTableS3BrokerTest : public ExternalTableArnTest {
       GTEST_SKIP() << "S3 broker tests require S3_BROKER_TEST_ENV_{CLOUD_PROVIDER,ADDRESS,REGION,BUCKET,"
                       "ROLE_ARN,CREDENTIAL_ENDPOINT} and either ACCESS_KEY/SECRET_KEY or USE_IAM=true";
     }
+    ArrowFileSystemConfig broker_config;
+    broker_config.cloud_provider = cloud_provider_;
+    broker_config.credential_endpoint = endpoint;
+    ASSERT_TRUE(broker_config.IsAwsCredentialBrokerEnabled())
+        << "Unsupported S3 Broker test provider: " << cloud_provider_;
 
     const auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
     test_base_ = "zc/s3-broker-test-" + std::to_string(ts);
     const auto manifest_root = (std::filesystem::temp_directory_path() / "milvus-storage-s3-broker-test").string();
     FilesystemCache::getInstance().clean();
 
-    // Native Lance/Iceberg writers use the S3-compatible backend for these
-    // providers. Reads retain the selected provider to exercise its broker path.
-    const auto write_provider = (cloud_provider_ == kCloudProviderTencent || cloud_provider_ == kCloudProviderHuawei ||
-                                 cloud_provider_ == kCloudProviderVolcengine)
-                                    ? kCloudProviderAWS
-                                    : cloud_provider_;
+    // Native Lance/Iceberg writers use the AWS S3 backend for Tencent.
+    const auto write_provider = cloud_provider_ == kCloudProviderTencent ? kCloudProviderAWS : cloud_provider_;
     if (GetParam() == LOON_FORMAT_LANCE_TABLE && write_provider != cloud_provider_) {
-      // Lance's URI builder also rejects these providers on the read path.
+      // Lance's URI builder rejects Tencent on the read path.
       GTEST_SKIP() << "Lance reads do not support cloud provider: " << cloud_provider_;
     }
     const std::vector<std::pair<std::string, std::string>> write_properties = {

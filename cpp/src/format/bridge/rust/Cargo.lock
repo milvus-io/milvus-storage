@@ -3456,9 +3456,9 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -8565,9 +8565,10 @@ checksum = "f764005d11ee5f36500a149ace24e00e3da98b0158b3e2d53a7495660d3f4d60"
 
 [[package]]
 name = "talon-backend"
-version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=010ab9bc9945ca21959e6e773ebd802041b5d079#010ab9bc9945ca21959e6e773ebd802041b5d079"
+version = "0.3.1"
+source = "git+https://github.com/milvus-io/talon.git?rev=84da28febc76d78ef3eaba6005a1d7f1178c0787#84da28febc76d78ef3eaba6005a1d7f1178c0787"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "aws-config",
  "aws-credential-types",
@@ -8592,8 +8593,8 @@ dependencies = [
 
 [[package]]
 name = "talon-cache-client"
-version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=010ab9bc9945ca21959e6e773ebd802041b5d079#010ab9bc9945ca21959e6e773ebd802041b5d079"
+version = "0.3.1"
+source = "git+https://github.com/milvus-io/talon.git?rev=84da28febc76d78ef3eaba6005a1d7f1178c0787#84da28febc76d78ef3eaba6005a1d7f1178c0787"
 dependencies = [
  "bytes",
  "futures",
@@ -8607,8 +8608,8 @@ dependencies = [
 
 [[package]]
 name = "talon-core"
-version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=010ab9bc9945ca21959e6e773ebd802041b5d079#010ab9bc9945ca21959e6e773ebd802041b5d079"
+version = "0.3.1"
+source = "git+https://github.com/milvus-io/talon.git?rev=84da28febc76d78ef3eaba6005a1d7f1178c0787#84da28febc76d78ef3eaba6005a1d7f1178c0787"
 dependencies = [
  "async-trait",
  "bytes",
@@ -8625,8 +8626,8 @@ dependencies = [
 
 [[package]]
 name = "talon-rust-client"
-version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=010ab9bc9945ca21959e6e773ebd802041b5d079#010ab9bc9945ca21959e6e773ebd802041b5d079"
+version = "0.3.1"
+source = "git+https://github.com/milvus-io/talon.git?rev=84da28febc76d78ef3eaba6005a1d7f1178c0787#84da28febc76d78ef3eaba6005a1d7f1178c0787"
 dependencies = [
  "futures",
  "talon-backend",
@@ -8641,8 +8642,8 @@ dependencies = [
 
 [[package]]
 name = "talon-telemetry"
-version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=010ab9bc9945ca21959e6e773ebd802041b5d079#010ab9bc9945ca21959e6e773ebd802041b5d079"
+version = "0.3.1"
+source = "git+https://github.com/milvus-io/talon.git?rev=84da28febc76d78ef3eaba6005a1d7f1178c0787#84da28febc76d78ef3eaba6005a1d7f1178c0787"
 dependencies = [
  "pin-project-lite",
  "scoped-tls",
@@ -8652,8 +8653,8 @@ dependencies = [
 
 [[package]]
 name = "talon-transport"
-version = "0.1.0"
-source = "git+https://github.com/milvus-io/talon.git?rev=010ab9bc9945ca21959e6e773ebd802041b5d079#010ab9bc9945ca21959e6e773ebd802041b5d079"
+version = "0.3.1"
+source = "git+https://github.com/milvus-io/talon.git?rev=84da28febc76d78ef3eaba6005a1d7f1178c0787#84da28febc76d78ef3eaba6005a1d7f1178c0787"
 dependencies = [
  "anyhow",
  "bincode",
@@ -9227,14 +9228,15 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.7"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08bc136a29a3d1758e07a9cca267be308aeebf5cfd5a10f3f67ab2097683ef5b"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]
