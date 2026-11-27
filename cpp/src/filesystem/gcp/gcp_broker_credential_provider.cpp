@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/gcp/gcp_broker_credential_provider.h"
+#include <folly/ScopeGuard.h>
+#include "milvus-storage/filesystem/fs.h"
 
 #include <algorithm>
 #include <charconv>
@@ -100,13 +102,34 @@ bool ParseContentLength(const std::string& value, uint64_t* content_length) {
 
 }  // namespace
 
-GcpBrokerCredentialProvider::GcpBrokerCredentialProvider(GcpBrokerConfig config,
+struct GcpBrokerCredentialProvider::BrokerConfig {
+  std::string endpoint;
+  std::string region;
+  std::string bucket;
+  std::string target_service_account;
+  int32_t duration_seconds = 900;
+  int64_t request_timeout_ms = 3000;
+  bool use_iam = false;
+};
+
+GcpBrokerCredentialProvider::GcpBrokerCredentialProvider(const ArrowFileSystemConfig& config,
                                                          std::shared_ptr<Azure::Core::Http::HttpTransport> transport,
                                                          Clock clock)
-    : config_(std::move(config)), transport_(std::move(transport)), clock_(std::move(clock)) {
+    : GcpCredentialProvider(config),
+      config_(std::make_unique<const BrokerConfig>(BrokerConfig{
+          .endpoint = config.credential_endpoint,
+          .region = config.region,
+          .bucket = config.bucket_name,
+          .target_service_account = config.use_iam ? "" : config.gcp_target_service_account,
+          .duration_seconds = config.load_frequency,
+          .request_timeout_ms = config.request_timeout_ms,
+          .use_iam = config.use_iam,
+      })),
+      transport_(std::move(transport)),
+      clock_(std::move(clock)) {
   if (!transport_) {
     Azure::Core::Http::CurlTransportOptions options;
-    options.ConnectionTimeout = std::chrono::milliseconds(config_.request_timeout_ms);
+    options.ConnectionTimeout = std::chrono::milliseconds(config_->request_timeout_ms);
     transport_ = std::make_shared<Azure::Core::Http::CurlTransport>(options);
   }
   if (!clock_) {
@@ -117,28 +140,28 @@ GcpBrokerCredentialProvider::GcpBrokerCredentialProvider(GcpBrokerConfig config,
 GcpBrokerCredentialProvider::~GcpBrokerCredentialProvider() = default;
 
 arrow::Result<std::string> GcpBrokerCredentialProvider::FetchToken(TimePoint now, TimePoint* expires_at) const {
-  nlohmann::json request_json = {
-      {credential_broker::kCsp, kCloudProviderGCP},
-      {credential_broker::kRegion, config_.region},
-      {credential_broker::kBucket, config_.bucket},
-      {credential_broker::kDurationSeconds, config_.duration_seconds},
-  };
-  if (config_.use_iam) {
-    request_json[credential_broker::kCredentialType] = credential_broker::kIam;
-  } else {
-    request_json[credential_broker::kGcpServiceAccountEmail] = config_.target_service_account;
-  }
-
-  const auto request_body = request_json.dump();
-  const std::vector<uint8_t> request_bytes(request_body.begin(), request_body.end());
-  Azure::Core::IO::MemoryBodyStream body_stream(request_bytes);
-
   bool request_completed = false;
   bool response_body_read_completed = false;
   size_t response_size = 0;
   GcpBrokerResponse broker_response;
   try {
-    Azure::Core::Http::Request request(Azure::Core::Http::HttpMethod::Post, Azure::Core::Url(config_.endpoint),
+    nlohmann::json request_json = {
+        {credential_broker::kCsp, kCloudProviderGCP},
+        {credential_broker::kRegion, config_->region},
+        {credential_broker::kBucket, config_->bucket},
+        {credential_broker::kDurationSeconds, config_->duration_seconds},
+    };
+    if (config_->use_iam) {
+      request_json[credential_broker::kCredentialType] = credential_broker::kIam;
+    } else {
+      request_json[credential_broker::kGcpServiceAccountEmail] = config_->target_service_account;
+    }
+
+    const auto request_body = request_json.dump();
+    const std::vector<uint8_t> request_bytes(request_body.begin(), request_body.end());
+    Azure::Core::IO::MemoryBodyStream body_stream(request_bytes);
+
+    Azure::Core::Http::Request request(Azure::Core::Http::HttpMethod::Post, Azure::Core::Url(config_->endpoint),
                                        &body_stream);
     request.SetHeader("Content-Type", "application/json");
     request.SetHeader("Content-Length", std::to_string(request_bytes.size()));
@@ -146,16 +169,16 @@ arrow::Result<std::string> GcpBrokerCredentialProvider::FetchToken(TimePoint now
     // The injected clock controls token freshness only. The deadline uses the
     // real clock and also bounds reading the response body.
     const auto deadline =
-        Azure::DateTime(std::chrono::system_clock::now() + std::chrono::milliseconds(config_.request_timeout_ms));
+        Azure::DateTime(std::chrono::system_clock::now() + std::chrono::milliseconds(config_->request_timeout_ms));
     const auto context = Azure::Core::Context().WithDeadline(deadline);
     auto response = transport_->Send(request, context);
     request_completed = true;
     if (!response) {
-      return arrow::Status::IOError("GCP credential broker returned no HTTP response: endpoint=", config_.endpoint);
+      return arrow::Status::IOError("GCP credential broker returned no HTTP response: endpoint=", config_->endpoint);
     }
     const int status_code = static_cast<int>(response->GetStatusCode());
     if (status_code < 200 || status_code >= 300) {
-      return arrow::Status::IOError("GCP credential broker returned an HTTP error: endpoint=", config_.endpoint,
+      return arrow::Status::IOError("GCP credential broker returned an HTTP error: endpoint=", config_->endpoint,
                                     ", status_code=", status_code, ", reason=", response->GetReasonPhrase());
     }
 
@@ -166,10 +189,10 @@ arrow::Result<std::string> GcpBrokerCredentialProvider::FetchToken(TimePoint now
       uint64_t content_length = 0;
       if (!ParseContentLength(header->second, &content_length)) {
         return arrow::Status::IOError("GCP credential broker returned an invalid Content-Length header: endpoint=",
-                                      config_.endpoint, ", content_length=", header->second);
+                                      config_->endpoint, ", content_length=", header->second);
       }
       if (content_length > kMaxResponseBytes) {
-        return arrow::Status::IOError("GCP credential broker response is too large: endpoint=", config_.endpoint,
+        return arrow::Status::IOError("GCP credential broker response is too large: endpoint=", config_->endpoint,
                                       ", content_length=", content_length, ", limit=", kMaxResponseBytes);
       }
     }
@@ -184,14 +207,14 @@ arrow::Result<std::string> GcpBrokerCredentialProvider::FetchToken(TimePoint now
     response_body_read_completed = true;
     response_size = response_body.size();
     if (response_size > kMaxResponseBytes) {
-      return arrow::Status::IOError("GCP credential broker response body is too large: endpoint=", config_.endpoint,
+      return arrow::Status::IOError("GCP credential broker response body is too large: endpoint=", config_->endpoint,
                                     ", read_at_least=", response_size, ", limit=", kMaxResponseBytes);
     }
     const auto response_json = nlohmann::json::parse(response_body.begin(), response_body.end());
     response_json.get_to(broker_response);
 
     if (!broker_response.success) {
-      return arrow::Status::IOError("GCP credential broker returned success=false: endpoint=", config_.endpoint);
+      return arrow::Status::IOError("GCP credential broker returned success=false: endpoint=", config_->endpoint);
     }
     if (broker_response.token.access_token.empty()) {
       return arrow::Status::IOError(
@@ -212,20 +235,23 @@ arrow::Result<std::string> GcpBrokerCredentialProvider::FetchToken(TimePoint now
     }
 
     // The Broker cannot grant a longer lifetime than this provider asked for.
-    *expires_at = std::min(expiration, now + std::chrono::seconds(config_.duration_seconds));
+    *expires_at = std::min(expiration, now + std::chrono::seconds(config_->duration_seconds));
     return std::move(broker_response.token.access_token);
   } catch (const nlohmann::json::parse_error& error) {
-    return arrow::Status::IOError("GCP credential broker returned invalid JSON: endpoint=", config_.endpoint,
+    return arrow::Status::IOError("GCP credential broker returned invalid JSON: endpoint=", config_->endpoint,
                                   ", parse_error_byte=", error.byte, ", response_size=", response_size);
   } catch (const nlohmann::json::exception& error) {
+    if (!request_completed) {
+      return arrow::Status::Invalid("GCP credential broker request could not be encoded: ", error.what());
+    }
     return arrow::Status::IOError("GCP credential broker response schema is invalid: ", error.what());
   } catch (const std::exception& error) {
     if (!request_completed) {
-      return arrow::Status::IOError("GCP credential broker request failed: endpoint=", config_.endpoint,
+      return arrow::Status::IOError("GCP credential broker request failed: endpoint=", config_->endpoint,
                                     ", error=", error.what());
     }
     if (!response_body_read_completed) {
-      return arrow::Status::IOError("GCP credential broker response body read failed: endpoint=", config_.endpoint,
+      return arrow::Status::IOError("GCP credential broker response body read failed: endpoint=", config_->endpoint,
                                     ", error=", error.what());
     }
     return arrow::Status::IOError("GCP credential broker returned an invalid expiration time: expiredAt=",
@@ -235,11 +261,11 @@ arrow::Result<std::string> GcpBrokerCredentialProvider::FetchToken(TimePoint now
     // library boundaries: classify by phase so the log stays actionable.
     if (!request_completed) {
       return arrow::Status::IOError("GCP credential broker request failed with an unknown exception: endpoint=",
-                                    config_.endpoint);
+                                    config_->endpoint);
     }
     if (!response_body_read_completed) {
       return arrow::Status::IOError(
-          "GCP credential broker response body read failed with an unknown exception: endpoint=", config_.endpoint);
+          "GCP credential broker response body read failed with an unknown exception: endpoint=", config_->endpoint);
     }
     return arrow::Status::IOError("GCP credential broker returned an invalid expiration time: expiredAt=",
                                   broker_response.token.expired_at, ", error=unknown exception");
@@ -251,8 +277,10 @@ arrow::Result<std::string> GcpBrokerCredentialProvider::FetchTokenWithRetries(bo
   auto fetched = FetchToken(clock_(), expires_at);
   auto retry_delay = std::chrono::milliseconds(100);
   for (int retries = 0; allow_retries && !fetched.ok() && retries < kMaxInitialRetries; ++retries) {
+    if (fetched.status().IsInvalid())
+      break;
     LOG_STORAGE_WARNING_ << "GCP credential broker fetch failed: " << fetched.status().ToString()
-                         << ", endpoint=" << config_.endpoint << ", retry=" << retries + 1 << "/" << kMaxInitialRetries
+                         << ", endpoint=" << config_->endpoint << ", retry=" << retries + 1 << "/" << kMaxInitialRetries
                          << ", retry_delay_ms=" << retry_delay.count();
     std::this_thread::sleep_for(retry_delay);
     fetched = FetchToken(clock_(), expires_at);
@@ -292,8 +320,8 @@ arrow::Result<std::string> GcpBrokerCredentialProvider::GetToken() {
     if (InFailureBackoff(now)) {
       const auto remaining =
           std::chrono::duration_cast<std::chrono::milliseconds>(kFailureBackoff - (now - *last_failure_at_));
-      return arrow::Status::IOError("GCP credential broker fetch suppressed for ", remaining.count(),
-                                    " ms after a failure: ", last_failure_.message());
+      return last_failure_.WithMessage("GCP credential broker fetch suppressed for ", remaining.count(),
+                                       " ms after a failure: ", last_failure_.message());
     }
     break;
   }
@@ -301,12 +329,19 @@ arrow::Result<std::string> GcpBrokerCredentialProvider::GetToken() {
   // This thread owns the Broker call. Retries only apply before the provider
   // has ever obtained a token; refreshes stay single attempts.
   fetch_in_flight_ = true;
+  // A failed request can throw before reaching the transport (for example
+  // during JSON serialization). Always release every waiter, including on unwind.
+  auto release_waiters = folly::makeGuard([&] {
+    if (!lock.owns_lock())
+      lock.lock();
+    fetch_in_flight_ = false;
+    cv_.notify_all();
+  });
   const bool allow_retries = !cached_.has_value();
   lock.unlock();
   TimePoint expires_at;
   auto fetched = FetchTokenWithRetries(allow_retries, &expires_at);
   lock.lock();
-  fetch_in_flight_ = false;
   if (fetched.ok()) {
     cached_ = CachedToken{std::move(fetched).ValueOrDie(), expires_at};
     last_failure_at_.reset();
@@ -315,11 +350,10 @@ arrow::Result<std::string> GcpBrokerCredentialProvider::GetToken() {
     last_failure_at_ = clock_();
     last_failure_ = fetched.status();
   }
-  cv_.notify_all();
 
   if (fetched.ok()) {
-    LOG_STORAGE_DEBUG_ << "GCP credential broker refresh succeeded: endpoint=" << config_.endpoint
-                       << ", bucket=" << config_.bucket << ", region=" << config_.region
+    LOG_STORAGE_DEBUG_ << "GCP credential broker refresh succeeded: endpoint=" << config_->endpoint
+                       << ", bucket=" << config_->bucket << ", region=" << config_->region
                        << ", expires_at=" << Azure::DateTime(expires_at).ToString(Azure::DateTime::DateFormat::Rfc3339);
     return cached_->access_token;
   }
@@ -334,21 +368,11 @@ arrow::Result<std::string> GcpBrokerCredentialProvider::GetToken() {
   return fetched.status();
 }
 
-std::optional<std::pair<std::string, std::string>> GcpBrokerCredentialProvider::AuthorizationHeader() {
-  try {
-    auto token = GetToken();
-    if (!token.ok()) {
-      LOG_STORAGE_WARNING_ << "GCP credential broker token unavailable: " << token.status().ToString()
-                           << "; request will proceed without Authorization, server will reply 401/403";
-      return std::nullopt;
-    }
-    return std::make_pair(std::string("Authorization"), "Bearer " + token.ValueOrDie());
-  } catch (const std::exception& e) {
-    LOG_STORAGE_WARNING_ << "GCP credential broker token unavailable: " << e.what();
-  } catch (...) {
-    LOG_STORAGE_WARNING_ << "GCP credential broker token unavailable: unknown exception";
-  }
-  return std::nullopt;
+arrow::Result<bool> GcpBrokerCredentialProvider::AuthorizeRequest(
+    const std::shared_ptr<Aws::Http::HttpRequest>& request) {
+  ARROW_ASSIGN_OR_RAISE(auto token, GetToken());
+  request->SetHeaderValue("Authorization", ("Bearer " + token).c_str());
+  return true;
 }
 
 }  // namespace milvus_storage

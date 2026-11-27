@@ -218,6 +218,29 @@ void TalonIoCallbackImpl(void* context, int32_t error_code, uint64_t value, cons
 
 }  // namespace
 
+bool ShouldTalonUseCredentialBroker(const ArrowFileSystemConfig& config) {
+  // Forward target roles from native OIDC on AWS, Aliyun, and Tencent, and
+  // target service accounts from GCP impersonation.
+  // The Talon worker uses its configured Broker URL.
+  if (config.credential_endpoint.empty()) {
+    if (config.talon_mode == TalonMode::Disabled) {
+      return false;
+    }
+    if (config.cloud_provider == kCloudProviderGCP) {
+      return !config.gcp_target_service_account.empty();
+    }
+    // Native S3 selects the target role before IAM when no Broker URL is configured.
+    return !config.role_arn.empty() &&
+           (config.cloud_provider == kCloudProviderAWS || config.cloud_provider == kCloudProviderAliyun ||
+            config.cloud_provider == kCloudProviderTencent);
+  }
+  // Azure external tables use SAS. Their non-IAM Broker descriptor requires
+  // an explicit fs.credential_endpoint.
+  return config.IsAzureCredentialBrokerEnabled(/*include_iam=*/false) ||
+         config.IsAwsCredentialBrokerEnabled(/*include_iam=*/false) ||
+         config.IsGcpCredentialBrokerEnabled(/*include_iam=*/false);
+}
+
 arrow::Result<std::string> TalonClient::BuildCredentialBrokerIAMJson(const ArrowFileSystemConfig& config) {
   // Broker IAM ignores target identity fields, even when they are present in the filesystem config.
   nlohmann::json request = {{credential_broker::kCredentialType, credential_broker::kIam}};
@@ -230,7 +253,7 @@ arrow::Result<std::string> TalonClient::BuildCredentialBrokerIAMJson(const Arrow
   request[credential_broker::kDurationSeconds] = config.load_frequency;
   std::string endpoint = config.address;
   bool use_virtual_host = config.use_virtual_host;
-  if (config.cloud_provider == kCloudProviderAzure) {
+  if (config.IsAzureCredentialBrokerEnabled()) {
     if (config.access_key_id.empty()) {
       return arrow::Status::Invalid("Talon Azure Broker requires fs.access_key_id");
     }
@@ -241,20 +264,17 @@ arrow::Result<std::string> TalonClient::BuildCredentialBrokerIAMJson(const Arrow
     if (use_virtual_host) {
       endpoint = config.access_key_id + ".blob." + (endpoint.empty() ? "core.windows.net" : endpoint);
     }
-  } else if (config.cloud_provider == kCloudProviderAWS || config.cloud_provider == kCloudProviderAliyun ||
-             config.cloud_provider == kCloudProviderTencent) {
+  } else if (config.IsAwsCredentialBrokerEnabled()) {
     if (config.region.empty() || config.load_frequency < 900 || config.load_frequency > 3600) {
       return arrow::Status::Invalid("Talon S3 Broker requires fs.region and fs.load_frequency in [900, 3600]");
     }
-    // Match the native S3 provider's Broker CSP aliases and forced virtual-host addressing.
     if (config.cloud_provider == kCloudProviderAliyun) {
       request[credential_broker::kCsp] = credential_broker::kCspAliyun;
-      use_virtual_host = true;
     } else if (config.cloud_provider == kCloudProviderTencent) {
       request[credential_broker::kCsp] = credential_broker::kCspTencent;
-      use_virtual_host = true;
     }
-  } else if (config.cloud_provider != kCloudProviderGCP) {
+    use_virtual_host = use_virtual_host || config.cloud_provider != kCloudProviderAWS;
+  } else if (!config.IsGcpCredentialBrokerEnabled()) {
     return arrow::Status::Invalid("Talon credential Broker IAM supports AWS, Aliyun, Tencent, GCP, and Azure");
   }
   if (endpoint.empty()) {
@@ -289,7 +309,8 @@ arrow::Result<std::string> TalonClient::BuildCredentialBrokerARNJson(const Arrow
   request[credential_broker::kDurationSeconds] = config.load_frequency;
   std::string endpoint = config.address;
   bool use_virtual_host = config.use_virtual_host;
-  if (config.cloud_provider == kCloudProviderAzure) {
+  const bool use_worker_broker = config.credential_endpoint.empty();
+  if (config.IsAzureCredentialBrokerEnabled(/*include_iam=*/false)) {
     if (config.access_key_id.empty()) {
       return arrow::Status::Invalid("Talon Azure Broker requires fs.access_key_id");
     }
@@ -307,7 +328,14 @@ arrow::Result<std::string> TalonClient::BuildCredentialBrokerARNJson(const Arrow
     if (use_virtual_host) {
       endpoint = config.access_key_id + ".blob." + (endpoint.empty() ? "core.windows.net" : endpoint);
     }
-  } else if (config.cloud_provider == kCloudProviderAWS) {
+  } else if (config.IsGcpCredentialBrokerEnabled(/*include_iam=*/false) ||
+             (use_worker_broker && config.cloud_provider == kCloudProviderGCP)) {
+    if (config.gcp_target_service_account.empty()) {
+      return arrow::Status::Invalid("Talon GCP Broker stsAssumeRole requires fs.gcp_target_service_account");
+    }
+    request[credential_broker::kGcpServiceAccountEmail] = config.gcp_target_service_account;
+  } else if (config.IsAwsCredentialBrokerEnabled(/*include_iam=*/false) || use_worker_broker) {
+    // Make only selects the remaining empty Broker URL path for supported S3 target roles.
     if (config.region.empty() || config.load_frequency < 900 || config.load_frequency > 3600) {
       return arrow::Status::Invalid("Talon S3 Broker requires fs.region and fs.load_frequency in [900, 3600]");
     }
@@ -318,13 +346,16 @@ arrow::Result<std::string> TalonClient::BuildCredentialBrokerARNJson(const Arrow
     if (!config.external_id.empty()) {
       request[credential_broker::kExternalId] = config.external_id;
     }
-  } else if (config.cloud_provider == kCloudProviderGCP) {
-    if (config.gcp_target_service_account.empty()) {
-      return arrow::Status::Invalid("Talon GCP Broker stsAssumeRole requires fs.gcp_target_service_account");
+    if (config.cloud_provider == kCloudProviderAliyun) {
+      request[credential_broker::kCsp] = credential_broker::kCspAliyun;
+    } else if (config.cloud_provider == kCloudProviderTencent) {
+      request[credential_broker::kCsp] = credential_broker::kCspTencent;
     }
-    request[credential_broker::kGcpServiceAccountEmail] = config.gcp_target_service_account;
+    // Match the S3 producer's virtual-host addressing for S3-compatible clouds.
+    use_virtual_host = use_virtual_host || config.cloud_provider != kCloudProviderAWS;
   } else {
-    return arrow::Status::Invalid("Talon credential Broker supports AWS, GCP, and Azure target identities");
+    return arrow::Status::Invalid("Talon credential Broker does not support target identities for cloud provider: ",
+                                  config.cloud_provider);
   }
   if (endpoint.empty()) {
     return arrow::Status::Invalid("Talon credential Broker requires fs.address");
@@ -349,8 +380,9 @@ arrow::Result<std::string> TalonClient::BuildCredentialBrokerARNJson(const Arrow
 
 arrow::Result<std::shared_ptr<TalonClient>> TalonClient::Make(const ArrowFileSystemConfig& config) {
   std::string credential_broker_json;
-  if (!config.credential_endpoint.empty()) {
-    if (config.use_iam) {
+  const bool has_broker_endpoint = !config.credential_endpoint.empty();
+  if (has_broker_endpoint || ShouldTalonUseCredentialBroker(config)) {
+    if (has_broker_endpoint && config.use_iam) {
       ARROW_ASSIGN_OR_RAISE(credential_broker_json, BuildCredentialBrokerIAMJson(config));
     } else {
       ARROW_ASSIGN_OR_RAISE(credential_broker_json, BuildCredentialBrokerARNJson(config));

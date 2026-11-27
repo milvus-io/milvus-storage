@@ -15,62 +15,69 @@
 #pragma once
 
 #include <memory>
-#include <optional>
+#include <mutex>
 #include <string>
-#include <utility>
 
 #include <arrow/result.h>
-#include <arrow/status.h>
+#include <aws/core/auth/AWSCredentials.h>
+#include <aws/core/auth/AWSCredentialsProvider.h>
 #include <aws/core/http/HttpRequest.h>
+#include <aws/core/endpoint/EndpointProviderBase.h>
+
+namespace Aws {
+class AmazonWebServiceRequest;
+}
+
+namespace Aws::Client {
+class AWSClient;
+}  // namespace Aws::Client
 
 namespace milvus_storage {
 
 struct ArrowFileSystemConfig;
+struct S3Options;
 
-// GcpCredentialProvider abstracts the identity attached to GCP requests.
-//
-// A provider is looked up per-request by (endpoint, bucket) via
-// GcpCredentialRegistry. The GCP HTTP factory calls AuthorizationHeader() at
-// request creation to inject OAuth2 Bearer (IAM modes), and the HTTP delegator
-// calls MaybeSignConditionalWrite() to re-sign conditional writes with
-// GOOG4-HMAC-SHA256 (HMAC mode).
-//
-// Concrete implementations (VM IAM / Impersonation / HMAC) live entirely in
-// the .cpp — callers only ever see this interface and the factory below.
-class GcpCredentialProvider {
+class GcpCredentialProvider : public Aws::Auth::AWSCredentialsProvider {
   public:
-  virtual ~GcpCredentialProvider() = default;
+  // Configure one client before publication. True means its direct CRT reads
+  // need bearer authorization before native submission.
+  static bool ConfigS3HttpClient(const S3Options& options, Aws::Client::AWSClient& client);
+  // Direct reads bypass the SDK transmit interceptor. Validate the SDK-resolved
+  // destination before attaching this client's bearer to the modeled request.
+  static arrow::Result<bool> AuthorizeRead(const std::shared_ptr<Aws::Auth::AWSCredentialsProvider>& credentials,
+                                           Aws::AmazonWebServiceRequest& model,
+                                           Aws::Endpoint::ResolveEndpointOutcome endpoint,
+                                           const std::string& key,
+                                           Aws::Http::HttpMethod method);
 
-  // Returns {header_name, header_value} for IAM/Impersonation modes, or
-  // std::nullopt for HMAC (AWS SDK's SigV4 will sign the request itself).
-  virtual std::optional<std::pair<std::string, std::string>> AuthorizationHeader() = 0;
+  // Bearer providers set the Authorization header in AuthorizeRequest(). Empty credentials
+  // tell the AWS SDK to skip SigV4 signing. The HMAC provider overrides this with its key pair.
+  Aws::Auth::AWSCredentials GetAWSCredentials() override { return {}; }
 
-  // Re-signs conditional writes using GOOG4-HMAC-SHA256 (HMAC mode only).
-  // No-op for IAM/Impersonation modes.
-  virtual arrow::Status MaybeSignConditionalWrite(const std::shared_ptr<Aws::Http::HttpRequest>& request) = 0;
+  protected:
+  explicit GcpCredentialProvider(const ArrowFileSystemConfig& config);
 
-  // Whether AuthorizationHeader() can return an OAuth2 Bearer token. HMAC
-  // providers sign requests instead and never return a header.
-  [[nodiscard]] virtual bool IssuesBearerToken() const = 0;
+  private:
+  friend struct S3Options;
+  friend class GcpFileSystemProducer;
+  friend class NativeS3Transport;
+  class RequestInterceptor;
 
-  // A stable description of the identity this provider authenticates as, for
-  // example "iam", "impersonate:<sa>", "broker:<endpoint>|<sa>" or
-  // "hmac:<access_key_id>". GcpCredentialRegistry refuses to map one
-  // (endpoint, bucket) to two providers with different identities.
-  [[nodiscard]] virtual std::string Identity() const = 0;
+  static void TrustEndpoint(const ArrowFileSystemConfig& config);
+  static bool MayCarryBearerToken(const Aws::Http::URI& uri);
+
+  // True when GCP supplied the final Authorization header. False preserves
+  // the SDK signature (ordinary HMAC). An unavailable bearer leaves the request unsigned.
+  virtual arrow::Result<bool> AuthorizeRequest(const std::shared_ptr<Aws::Http::HttpRequest>& request) = 0;
+
+  arrow::Result<bool> AuthorizeScopedRequest(const std::shared_ptr<Aws::Http::HttpRequest>& request, bool bearer);
+  const Aws::Http::URI endpoint_;
+  const std::string bucket_;
+  const Aws::String virtual_host_;
+  const std::string config_key_;
+  std::once_flag untrusted_warning_;
 };
 
-// Build the appropriate provider from a filesystem config, in this order:
-//   1. credential_endpoint: use the Broker's own identity with use_iam, or mint
-//      tokens for gcp_target_service_account otherwise.
-//   2. gcp_target_service_account: this process impersonates the target.
-//   3. use_iam: this process's own identity (VM SA or ADC).
-//   4. HMAC access_key_id/access_key_value.
-// Returns arrow::Status::Invalid when the config matches none of them.
 arrow::Result<std::shared_ptr<GcpCredentialProvider>> BuildGcpProviderFromConfig(const ArrowFileSystemConfig& config);
-
-// Broker IAM ignores HMAC keys. Otherwise, with HMAC keys and a target or Broker
-// endpoint in one config, the native filesystem keeps HMAC when Talon is enabled
-// (the Broker fields describe Talon's identity) and rejects the config as ambiguous otherwise.
 
 }  // namespace milvus_storage

@@ -564,7 +564,9 @@ class TalonFileSystem final : public arrow::fs::FileSystem,
            state_->config.talon_namespace == talon->state_->config.talon_namespace &&
            state_->config.talon_block_size == talon->state_->config.talon_block_size &&
            state_->config.talon_max_idle_per_addr == talon->state_->config.talon_max_idle_per_addr &&
-           ((state_->config.credential_endpoint.empty() && talon->state_->config.credential_endpoint.empty()) ||
+           ((state_->config.credential_endpoint.empty() && talon->state_->config.credential_endpoint.empty() &&
+             !ShouldTalonUseCredentialBroker(state_->config) &&
+             !ShouldTalonUseCredentialBroker(talon->state_->config)) ||
             state_->config.GetCacheKey() == talon->state_->config.GetCacheKey()) &&
            origin_fs_->Equals(*talon->origin_fs_);
   }

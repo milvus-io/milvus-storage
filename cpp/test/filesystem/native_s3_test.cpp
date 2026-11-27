@@ -19,7 +19,6 @@
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/async_output_stream.h"
 #include "milvus-storage/filesystem/fs.h"
-#include "milvus-storage/filesystem/gcp/gcp_credential_registry.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
@@ -213,14 +212,6 @@ TEST_F(NativeS3Test, OtherProvidersUseNativeRequestsWithoutAnIoWorker) {
     SCOPED_TRACE(provider);
     auto options = options_;
     options.cloud_provider = provider;
-    if (options.cloud_provider == "gcp") {
-      ArrowFileSystemConfig config;
-      config.access_key_id = "fixture";
-      config.access_key_value = "fixture-secret";
-      ASSERT_OK_AND_ASSIGN(auto credentials, BuildGcpProviderFromConfig(config));
-      ASSERT_OK(GcpCredentialRegistry::Instance().Register(
-          {NormalizeGcpEndpoint(options.endpoint_override, false), "bucket"}, std::move(credentials)));
-    }
     ASSERT_OK_AND_ASSIGN(auto s3, S3FileSystem::Make(options, arrow::io::IOContext(executor_.get())));
     auto fs = std::make_shared<FileSystemProxy>(prefix_, s3);
     ASSERT_OK_AND_ASSIGN(auto info, Await(Stat(fs, "hello #?+% 中文")));

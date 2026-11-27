@@ -16,7 +16,7 @@ extern "C" {
 /// and ignores target identity fields. false (default) uses the supplied target identity.
 /// Property-derived Broker defaults are scoped to fs.bucket_name. Per-request
 /// Broker overrides supply their own descriptor; URI buckets must match it.
-/// Broker-backed GCP objects use gcs:// URIs; S3 and Azure use s3:// and az://.
+/// Talon object URIs use s3://, ali://, tc://, gcs://, or az:// for their provider.
 typedef uintptr_t LoonTalonClientHandle;
 
 /// Optional overrides for one operation, without changing the shared client.
@@ -26,7 +26,8 @@ typedef uintptr_t LoonTalonClientHandle;
 /// Async calls copy both strings before returning; callers may then release them.
 typedef struct LoonTalonRequestOptions {
   const char* namespace_name;
-  /// Complete UTF-8 JSON {url, request, origin:{endpoint,...}}, at most 16 KiB.
+  /// UTF-8 JSON {request, origin:{endpoint,...}}, at most 16 KiB.
+  /// An omitted or empty url uses the worker's Broker endpoint when configured.
   /// S3 descriptors also require origin.region. No cloud access keys are sent.
   const char* credential_broker;
 } LoonTalonRequestOptions;

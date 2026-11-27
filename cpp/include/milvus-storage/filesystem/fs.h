@@ -252,17 +252,13 @@ struct ArrowFileSystemConfig {
   // Cloud provider | IAM Broker API | Non-IAM Broker API (native) | Non-IAM Broker API (Talon)
   // ---------------+----------------+-----------------------------+---------------------------
   // aws            | True           | True                        | True
-  // aliyun         | True           | True                        | False
-  // tencent        | True           | True                        | False
+  // aliyun         | True           | True                        | True
+  // tencent        | True           | True                        | True
   // huawei         | False          | False                       | False
   // volcengine     | False          | False                       | False
   // gcp            | True           | True                        | True
   // azure          | True           | True                        | True
-  // Talon's Broker backend accepts S3 target roles only with csp=aws, so the
-  // Talon bridge rejects Aliyun/Tencent target-role configurations instead of
-  // sending a request the backend would refuse. Native non-IAM configurations
-  // for huawei/volcengine still route through the AWS STS Broker contract
-  // (csp=aws). This does not provide cloud-specific non-IAM Broker support.
+  // The Talon column describes worker-side exchange support.
   std::string credential_endpoint = "";
 
   // Azure broker-backed temporary SAS authentication.
@@ -334,24 +330,32 @@ struct ArrowFileSystemConfig {
       const std::shared_ptr<const milvus_storage::api::Properties>& properties_map, ArrowFileSystemConfig& result);
 
   /**
-   * @brief Return whether Azure broker-specific settings were supplied.
+   * @brief Return whether an Azure Broker endpoint was supplied.
    *
-   * A non-empty endpoint selects the Broker in either credential mode. Without
-   * use_iam, detect partial target configurations too so they are validated.
-   * Talon independently consumes credential_endpoint for its Broker requests.
+   * A non-empty endpoint selects the Broker in either credential mode.
+   * Set include_iam to false to select target-identity configurations only.
    */
-  [[nodiscard]] bool IsAzureCredentialBrokerEnabled() const;
+  [[nodiscard]] bool IsAzureCredentialBrokerEnabled(bool include_iam = true) const;
 
   /**
    * @brief Return whether credential broker authentication was requested for S3.
    *
    * A non-empty credential_endpoint selects the broker for AWS, Aliyun and
    * Tencent: use_iam chooses the broker's own identity, otherwise a target role.
-   * Huawei and Volcengine support only the existing AWS STS broker contract.
    * Required settings are validated separately; an empty endpoint keeps native
-   * role/IAM/AKSK selection.
+   * role/IAM/AKSK selection. Set include_iam to false to select target roles only.
    */
-  [[nodiscard]] bool IsAwsCredentialBrokerEnabled() const;
+  [[nodiscard]] bool IsAwsCredentialBrokerEnabled(bool include_iam = true) const;
+
+  /**
+   * @brief Return whether a GCP Broker endpoint was supplied.
+   *
+   * With use_iam=true, the Broker uses its own IAM identity. With use_iam=false,
+   * it uses gcp_target_service_account. Set include_iam to false to match only
+   * the target service account mode. create_file_system_config validates the
+   * endpoint and the required parameters.
+   */
+  [[nodiscard]] bool IsGcpCredentialBrokerEnabled(bool include_iam = true) const;
 
   /**
    * @brief Get the cache key for this filesystem configuration

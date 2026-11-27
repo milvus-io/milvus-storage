@@ -61,16 +61,18 @@ static std::map<std::string, CloudProviderType> CloudProviderType_Map = {
     {kCloudProviderHuawei, CloudProviderType::HUAWEICLOUD},
     {kCloudProviderVolcengine, CloudProviderType::VOLCENGINE}};
 
-bool ArrowFileSystemConfig::IsAzureCredentialBrokerEnabled() const {
-  return cloud_provider == kCloudProviderAzure &&
-         (!credential_endpoint.empty() || (!use_iam && (!azure_client_id.empty() || !azure_tenant_id.empty())));
+bool ArrowFileSystemConfig::IsAzureCredentialBrokerEnabled(const bool include_iam) const {
+  return (include_iam || !use_iam) && cloud_provider == kCloudProviderAzure && !credential_endpoint.empty();
 }
 
-bool ArrowFileSystemConfig::IsAwsCredentialBrokerEnabled() const {
-  return !credential_endpoint.empty() &&
+bool ArrowFileSystemConfig::IsAwsCredentialBrokerEnabled(const bool include_iam) const {
+  return (include_iam || !use_iam) && !credential_endpoint.empty() &&
          (cloud_provider == kCloudProviderAWS || cloud_provider == kCloudProviderAliyun ||
-          cloud_provider == kCloudProviderTencent ||
-          (!use_iam && (cloud_provider == kCloudProviderHuawei || cloud_provider == kCloudProviderVolcengine)));
+          cloud_provider == kCloudProviderTencent);
+}
+
+bool ArrowFileSystemConfig::IsGcpCredentialBrokerEnabled(const bool include_iam) const {
+  return (include_iam || !use_iam) && cloud_provider == kCloudProviderGCP && !credential_endpoint.empty();
 }
 
 std::string ArrowFileSystemConfig::GetCacheKey() const {
@@ -155,7 +157,12 @@ std::string ArrowFileSystemConfig::GetCacheKey() const {
     if (!use_iam || credential_endpoint.empty()) {
       hash_combine(gcp_target_service_account);
     }
-    if (!use_iam) {
+    const bool native_target_with_iam = use_iam && credential_endpoint.empty() && !gcp_target_service_account.empty();
+    const bool has_hmac = !access_key_id.empty() && !access_key_value.empty();
+    if (native_target_with_iam) {
+      hash_combine(has_hmac);
+    }
+    if (!use_iam || (native_target_with_iam && has_hmac && talon_mode != TalonMode::Disabled)) {
       hash_combine(access_key_id);
       hash_combine(access_key_value);
     }
@@ -403,20 +410,6 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(
       (result.talon_small_read_threshold == 0 || result.talon_small_read_threshold > 1024U * 1024U)) {
     return arrow::Status::Invalid("fs.talon.small_read_threshold must be between 1 and 1048576 bytes");
   }
-  if (result.talon_mode != TalonMode::Disabled) {
-    if (result.storage_type != "remote") {
-      return arrow::Status::Invalid("Talon requires fs.storage_type=remote");
-    }
-    if (result.talon_coordinator.empty()) {
-      return arrow::Status::Invalid("fs.talon.mode=", talon_mode, " requires fs.talon.coordinator");
-    }
-    if (result.talon_block_size == 0) {
-      return arrow::Status::Invalid("fs.talon.block_size must be greater than zero");
-    }
-    if (result.talon_max_idle_per_addr == 0) {
-      return arrow::Status::Invalid("fs.talon.max_idle_per_addr must be greater than zero");
-    }
-  }
 
   if (result.IsAwsCredentialBrokerEnabled()) {
     if (result.use_iam) {
@@ -444,11 +437,10 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(
   }
 
   if (result.IsAzureCredentialBrokerEnabled()) {
-    if (result.credential_endpoint.empty() || result.access_key_id.empty() || result.bucket_name.empty() ||
-        result.request_timeout_ms <= 0) {
+    if (result.access_key_id.empty() || result.bucket_name.empty() || result.request_timeout_ms <= 0) {
       return arrow::Status::Invalid(
-          "Azure credential broker mode requires fs.credential_endpoint, fs.access_key_id, fs.bucket_name, "
-          "and a positive fs.request_timeout_ms");
+          "Azure credential broker mode requires fs.access_key_id, fs.bucket_name, and a positive "
+          "fs.request_timeout_ms");
     }
     if (result.use_iam) {
       if (result.load_frequency < 900 || result.load_frequency > 3600) {
@@ -466,7 +458,8 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(
       return arrow::Status::Invalid("fs.credential_endpoint must be a valid HTTP(S) URL");
     }
   }
-  if (result.cloud_provider == kCloudProviderGCP && !result.credential_endpoint.empty()) {
+
+  if (result.IsGcpCredentialBrokerEnabled()) {
     if (result.bucket_name.empty() || result.request_timeout_ms <= 0) {
       return arrow::Status::Invalid(
           "GCP credential broker mode requires fs.bucket_name and a positive fs.request_timeout_ms");
@@ -481,6 +474,22 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(
       return arrow::Status::Invalid("fs.credential_endpoint must be a valid HTTP(S) URL");
     }
   }
+
+  if (result.talon_mode != TalonMode::Disabled) {
+    if (result.storage_type != "remote") {
+      return arrow::Status::Invalid("Talon requires fs.storage_type=remote");
+    }
+    if (result.talon_coordinator.empty()) {
+      return arrow::Status::Invalid("fs.talon.mode=", talon_mode, " requires fs.talon.coordinator");
+    }
+    if (result.talon_block_size == 0) {
+      return arrow::Status::Invalid("fs.talon.block_size must be greater than zero");
+    }
+    if (result.talon_max_idle_per_addr == 0) {
+      return arrow::Status::Invalid("fs.talon.max_idle_per_addr must be greater than zero");
+    }
+  }
+
   return arrow::Status::OK();
 }
 
