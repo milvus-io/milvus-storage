@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/provider/VolcengineCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/STSClientUtils.h"
 #include "milvus-storage/filesystem/s3/provider/VolcengineSTSClient.h"
 #include "milvus-storage/common/log.h"
 #include <aws/core/internal/AWSHttpResourceClient.h>
@@ -100,6 +101,7 @@ void VolcengineSTSAssumeRoleWebIdentityCredentialsProvider::InitClient() {
   // the log with "Unable to retrieve credentials from EC2 metadata" lines.
   Aws::Client::ClientConfiguration config(Aws::Client::ClientConfigurationInitValues{/*shouldDisableIMDS=*/true});
   config.scheme = Aws::Http::Scheme::HTTP;
+  ApplySTSTimeouts(config);
 
   Aws::Vector<Aws::String> retryableErrors;
   retryableErrors.push_back("IDPCommunicationError");

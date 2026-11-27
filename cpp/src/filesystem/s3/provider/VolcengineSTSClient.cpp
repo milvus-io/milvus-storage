@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/provider/VolcengineSTSClient.h"
+#include "milvus-storage/filesystem/s3/provider/STSClientUtils.h"
 #include "milvus-storage/common/log.h"
 #include <aws/core/internal/AWSHttpResourceClient.h>
 #include <aws/core/client/AWSClient.h>
@@ -317,24 +318,7 @@ VolcengineSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
   httpRequest->SetHeaderValue("Host", m_endpoint);
   httpRequest->SetHeaderValue("Content-Type", "application/x-www-form-urlencoded");
 
-  std::shared_ptr<Aws::IOStream> body = Aws::MakeShared<Aws::StringStream>("STS_RESOURCE_CLIENT_LOG_TAG");
-  *body << ss.str();
-
-  httpRequest->AddContentBody(body);
-  body->seekg(0, body->end);
-  auto streamSize = body->tellg();
-  body->seekg(0, body->beg);
-  Aws::StringStream contentLength;
-  contentLength << streamSize;
-  httpRequest->SetContentLength(contentLength.str());
-  // AWSHttpResourceClient retries POST requests without rewinding their bodies.
-  // Curl/CRT create a response stream before each upload, including retries
-  // after bodyless errors, so reset the form body for every attempt here.
-  httpRequest->SetResponseStreamFactory([body] {
-    body->clear();
-    body->seekg(0);
-    return Aws::Utils::Stream::DefaultResponseStreamFactoryMethod();
-  });
+  SetResendableBody(*httpRequest, ss.str(), "STS_RESOURCE_CLIENT_LOG_TAG");
 
   Aws::String credentialsStr = GetResourceWithAWSWebServiceResult(httpRequest).GetPayload();
 
@@ -488,18 +472,7 @@ VolcengineSTSCredentialsClient::STSAssumeRoleResult VolcengineSTSCredentialsClie
     httpRequest->SetHeaderValue("X-Security-Token", request.callerSecurityToken);
   }
 
-  std::shared_ptr<Aws::IOStream> body = Aws::MakeShared<Aws::StringStream>(STS_RESOURCE_CLIENT_LOG_TAG);
-  *body << body_str;
-  httpRequest->AddContentBody(body);
-  Aws::StringStream contentLength;
-  contentLength << body_str.size();
-  httpRequest->SetContentLength(contentLength.str());
-  // As in the OIDC request, resend the complete signed body on every attempt.
-  httpRequest->SetResponseStreamFactory([body] {
-    body->clear();
-    body->seekg(0);
-    return Aws::Utils::Stream::DefaultResponseStreamFactoryMethod();
-  });
+  SetResendableBody(*httpRequest, Aws::String(body_str.data(), body_str.size()), STS_RESOURCE_CLIENT_LOG_TAG);
 
   Aws::String credentialsStr = GetResourceWithAWSWebServiceResult(httpRequest).GetPayload();
 

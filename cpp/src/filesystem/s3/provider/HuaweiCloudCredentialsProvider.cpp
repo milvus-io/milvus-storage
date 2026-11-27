@@ -1,4 +1,5 @@
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/STSClientUtils.h"
 
 #include "milvus-storage/common/log.h"
 
@@ -74,6 +75,7 @@ HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::HuaweiCloudSTSAssumeRole
 
   Aws::Client::ClientConfiguration config(Aws::Client::ClientConfigurationInitValues{/*shouldDisableIMDS=*/true});
   config.scheme = Aws::Http::Scheme::HTTPS;
+  ApplySTSTimeouts(config);
   config.region = m_region;
 
   Aws::Vector<Aws::String> retryableErrors;

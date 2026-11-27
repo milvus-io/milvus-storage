@@ -1,4 +1,5 @@
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudSTSClient.h"
+#include "milvus-storage/filesystem/s3/provider/STSClientUtils.h"
 
 #include "milvus-storage/common/log.h"
 
@@ -56,13 +57,7 @@ HuaweiCloudSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
   httpRequest->SetHeaderValue("X-Idp-Id", request.providerId);
   httpRequest->SetHeaderValue("Content-Type", "application/json");
 
-  std::shared_ptr<Aws::IOStream> body = Aws::MakeShared<Aws::StringStream>("STS_RESOURCE_CLIENT_LOG_TAG");
-  *body << ss.str();
-  body->seekg(0, body->end);
-  auto streamSize = body->tellg();
-  body->seekg(0, body->beg);
-  httpRequest->SetContentLength(std::to_string(streamSize));
-  httpRequest->AddContentBody(body);
+  SetResendableBody(*httpRequest, ss.str(), "STS_RESOURCE_CLIENT_LOG_TAG");
   httpRequest->SetContentType("application/json; charset=utf-8");
 
   STSAssumeRoleWithWebIdentityResult result;

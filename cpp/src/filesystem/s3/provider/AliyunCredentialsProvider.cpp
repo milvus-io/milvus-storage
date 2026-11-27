@@ -15,6 +15,7 @@
  */
 
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/STSClientUtils.h"
 
 #include "milvus-storage/common/log.h"
 
@@ -119,6 +120,7 @@ void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::InitializeClient() {
 
   Aws::Client::ClientConfiguration config(Aws::Client::ClientConfigurationInitValues{/*shouldDisableIMDS=*/true});
   config.scheme = Aws::Http::Scheme::HTTPS;
+  ApplySTSTimeouts(config);
   // not need in [aliyun]
   // config.region = tmpRegion;
 

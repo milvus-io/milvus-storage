@@ -23,6 +23,7 @@
 
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/STSCredentialsProvider.h>
+#include <aws/core/client/DefaultRetryStrategy.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/standard/StandardHttpRequest.h>
 #include <aws/core/platform/Environment.h>
@@ -54,6 +55,7 @@
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/STSClientUtils.h"
 #include "milvus-storage/filesystem/s3/provider/VolcengineCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/VolcengineOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
@@ -246,12 +248,19 @@ arrow::Status S3FileSystemProducer::ConfigureAssumeRoleCredentials(S3Options& op
                      << ", external_id_set=" << (config_.external_id.empty() ? "false" : "true")
                      << ", load_frequency=" << config_.load_frequency;
   if (config_.cloud_provider == kCloudProviderAWS) {
-    std::shared_ptr<Aws::STS::STSClient> sts_client;
+    // Build the STS client here even without a region, which is what the SDK
+    // provider would otherwise build, so that its attempts and retries are
+    // bounded as for the other clouds. Keep IMDS enabled: the client signs
+    // AssumeRole with the default credential chain, which on EC2 gets the
+    // instance identity from IMDS.
+    Aws::Client::ClientConfiguration sts_config;
     if (!config_.region.empty()) {
-      Aws::Client::ClientConfiguration sts_config;
       sts_config.region = config_.region.c_str();
-      sts_client = Aws::MakeShared<Aws::STS::STSClient>("S3FileSystemProducer", sts_config);
     }
+    ApplySTSTimeouts(sts_config);
+    sts_config.retryStrategy =
+        Aws::MakeShared<Aws::Client::DefaultRetryStrategy>("S3FileSystemProducer", kSTSMaxRetries);
+    auto sts_client = Aws::MakeShared<Aws::STS::STSClient>("S3FileSystemProducer", sts_config);
     options.ConfigureAssumeRoleCredentials(config_.role_arn, config_.session_name, config_.external_id,
                                            config_.load_frequency, sts_client);
   } else if (config_.cloud_provider == kCloudProviderAliyun) {
