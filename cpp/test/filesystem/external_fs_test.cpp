@@ -321,7 +321,7 @@ TEST_F(ExternalFilesystemTest, ExtractExternalFsPropertiesTypeConversion) {
 }
 
 TEST_F(ExternalFilesystemTest, AwsCredentialBrokerExternalConfig) {
-  for (const auto* cloud : {kCloudProviderAWS, kCloudProviderAliyun, kCloudProviderTencent, kCloudProviderHuawei}) {
+  for (const auto* cloud : {kCloudProviderAWS, kCloudProviderAliyun, kCloudProviderTencent}) {
     SCOPED_TRACE(cloud);
     api::Properties props;
     props["extfs.broker.storage_type"] = std::string("remote");
@@ -336,6 +336,7 @@ TEST_F(ExternalFilesystemTest, AwsCredentialBrokerExternalConfig) {
     ASSERT_TRUE(result.ok()) << result.status();
     EXPECT_EQ(result->credential_endpoint, "http://credential-broker/v1/credentials/assume-role");
     EXPECT_TRUE(result->IsAwsCredentialBrokerEnabled());
+    EXPECT_TRUE(result->IsAwsCredentialBrokerEnabled(/*include_iam=*/false));
     EXPECT_FALSE(result->IsAzureCredentialBrokerEnabled());
 
     api::Properties default_props;
@@ -368,17 +369,13 @@ TEST_F(ExternalFilesystemTest, AwsCredentialBrokerExternalConfig) {
     props["extfs.broker.use_iam"] = std::string("true");
     props.erase("extfs.broker.role_arn");
     result = FilesystemCache::resolve_config(props, "s3://s3.us-west-2.amazonaws.com/customer-bucket/file");
-    if (std::string(cloud) == kCloudProviderHuawei) {
-      ASSERT_TRUE(result.ok()) << result.status();
-      EXPECT_FALSE(result->IsAwsCredentialBrokerEnabled());
-      continue;
-    }
     ASSERT_FALSE(result.ok());
     EXPECT_TRUE(result.status().IsInvalid());
     props["extfs.broker.credential_endpoint"] = valid.at("extfs.broker.credential_endpoint");
     result = FilesystemCache::resolve_config(props, "s3://s3.us-west-2.amazonaws.com/customer-bucket/file");
     ASSERT_TRUE(result.ok()) << result.status();
     EXPECT_TRUE(result->IsAwsCredentialBrokerEnabled());
+    EXPECT_FALSE(result->IsAwsCredentialBrokerEnabled(/*include_iam=*/false));
     for (const auto& [field, value] :
          {std::pair{"region", ""}, {"request_timeout_ms", "0"}, {"load_frequency", "3601"}}) {
       auto invalid_iam = props;
@@ -422,6 +419,7 @@ TEST_F(ExternalFilesystemTest, AzureCredentialBrokerConfigValidation) {
   auto config_result = FilesystemCache::resolve_config(props);
   ASSERT_TRUE(config_result.ok()) << config_result.status().ToString();
   EXPECT_TRUE(config_result->IsAzureCredentialBrokerEnabled());
+  EXPECT_TRUE(config_result->IsAzureCredentialBrokerEnabled(/*include_iam=*/false));
   EXPECT_FALSE(config_result->IsAwsCredentialBrokerEnabled());
   EXPECT_EQ(config_result->azure_client_id, "client");
   EXPECT_EQ(config_result->azure_tenant_id, "tenant");
@@ -439,6 +437,19 @@ TEST_F(ExternalFilesystemTest, AzureCredentialBrokerConfigValidation) {
   auto non_azure_config = *config_result;
   non_azure_config.cloud_provider = kCloudProviderAWS;
   EXPECT_FALSE(non_azure_config.IsAzureCredentialBrokerEnabled());
+
+  auto native_props = props;
+  native_props.erase(PROPERTY_FS_CREDENTIAL_ENDPOINT);
+  native_props[PROPERTY_FS_TALON_MODE] = static_cast<uint32_t>(TalonMode::Full);
+  native_props[PROPERTY_FS_TALON_COORDINATOR] = std::string("127.0.0.1:1");
+  native_props[PROPERTY_FS_USE_IAM] = true;
+  const auto native_config = FilesystemCache::resolve_config(native_props);
+  ASSERT_TRUE(native_config.ok()) << native_config.status();
+  EXPECT_FALSE(native_config->IsAzureCredentialBrokerEnabled());
+  auto other_target = *native_config;
+  other_target.azure_client_id = "other-client";
+  other_target.azure_tenant_id = "other-tenant";
+  EXPECT_EQ(native_config->GetCacheKey(), other_target.GetCacheKey());
 
   auto partial = props;
   partial.erase(PROPERTY_FS_AZURE_TENANT_ID);
@@ -483,6 +494,7 @@ TEST_F(ExternalFilesystemTest, LegacyAzureEndpointPreservesTargetIdentity) {
     ASSERT_TRUE(target.ok()) << target.status();
     EXPECT_EQ(target->GetCredentialEndpoint(), "https://legacy/credentials");
     EXPECT_FALSE(target->UsesBrokerIam());
+    EXPECT_TRUE(target->IsAzureCredentialBrokerEnabled(/*include_iam=*/false));
 
     props.erase(prefix + "azure_tenant_id");
     EXPECT_TRUE(FilesystemCache::resolve_config(props, path).status().IsInvalid());
@@ -491,6 +503,7 @@ TEST_F(ExternalFilesystemTest, LegacyAzureEndpointPreservesTargetIdentity) {
     ASSERT_TRUE(iam.ok()) << iam.status();
     EXPECT_EQ(iam->GetCredentialEndpoint(), "https://canonical/credentials");
     EXPECT_TRUE(iam->UsesBrokerIam());
+    EXPECT_FALSE(iam->IsAzureCredentialBrokerEnabled(/*include_iam=*/false));
     EXPECT_NE(iam->GetCacheKey(), target->GetCacheKey());
     props[prefix + "credential_endpoint"] = std::string("file:///invalid");
     EXPECT_TRUE(FilesystemCache::resolve_config(props, path).status().IsInvalid());
@@ -507,6 +520,8 @@ TEST_F(ExternalFilesystemTest, AzureBrokerIamValidatesActiveConfiguration) {
   props[PROPERTY_FS_USE_IAM] = true;
   const auto config = FilesystemCache::resolve_config(props);
   ASSERT_TRUE(config.ok()) << config.status();
+  EXPECT_TRUE(config->IsAzureCredentialBrokerEnabled());
+  EXPECT_FALSE(config->IsAzureCredentialBrokerEnabled(/*include_iam=*/false));
   EXPECT_TRUE(config->azure_client_id.empty());
   EXPECT_TRUE(config->azure_tenant_id.empty());
   EXPECT_TRUE(config->region.empty());
@@ -548,6 +563,7 @@ TEST_F(ExternalFilesystemTest, GcpCredentialBrokerConfigValidation) {
   auto config_result = FilesystemCache::resolve_config(props);
   ASSERT_TRUE(config_result.ok()) << config_result.status().ToString();
   EXPECT_EQ(config_result->credential_endpoint, "http://credential-broker/v1/credentials/assume-role");
+  EXPECT_TRUE(config_result->IsGcpCredentialBrokerEnabled(/*include_iam=*/false));
 
   auto missing_target = props;
   missing_target[PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT] = std::string();
@@ -562,7 +578,10 @@ TEST_F(ExternalFilesystemTest, GcpCredentialBrokerConfigValidation) {
 
   auto broker_iam = missing_target;
   broker_iam[PROPERTY_FS_USE_IAM] = true;
-  EXPECT_TRUE(FilesystemCache::resolve_config(broker_iam).ok());
+  const auto iam_config = FilesystemCache::resolve_config(broker_iam);
+  ASSERT_TRUE(iam_config.ok()) << iam_config.status();
+  EXPECT_TRUE(iam_config->IsGcpCredentialBrokerEnabled());
+  EXPECT_FALSE(iam_config->IsGcpCredentialBrokerEnabled(/*include_iam=*/false));
   auto missing_bucket = broker_iam;
   missing_bucket[PROPERTY_FS_BUCKET_NAME] = std::string();
   EXPECT_TRUE(FilesystemCache::resolve_config(missing_bucket).status().IsInvalid());

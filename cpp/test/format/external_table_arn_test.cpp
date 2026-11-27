@@ -2606,9 +2606,7 @@ TEST_F(ExternalTableAliyunOIDCArnTest, ReadVortexWithOIDCChain) {
 
 // ===========================================================================
 // External-table reads through an S3-compatible temporary-credential broker.
-// The cloud provider is supplied by the environment (e.g. aws, aliyun, tencent,
-// huawei); the fixture does not restrict it to AWS. The configured
-// storage provider and broker must support the requested AssumeRole contract.
+// The cloud provider is supplied by the environment (aws, aliyun, or tencent).
 // On 3.0, Broker reads use the C++ filesystem through Parquet and Vortex.
 // Setup credentials are used only to prepare/clean up data. Manifest storage is local.
 // ===========================================================================
@@ -2645,6 +2643,11 @@ class ExternalTableS3BrokerTest : public ExternalTableArnTest {
       GTEST_SKIP() << "S3 broker tests require S3_BROKER_TEST_ENV_{CLOUD_PROVIDER,ADDRESS,REGION,BUCKET,"
                       "ROLE_ARN,CREDENTIAL_ENDPOINT} and either ACCESS_KEY/SECRET_KEY or USE_IAM=true";
     }
+    ArrowFileSystemConfig broker_config;
+    broker_config.cloud_provider = cloud_provider_;
+    broker_config.credential_endpoint = endpoint;
+    ASSERT_TRUE(broker_config.IsAwsCredentialBrokerEnabled())
+        << "Unsupported S3 Broker test provider: " << cloud_provider_;
 
     const auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
     test_base_ = "zc/s3-broker-test-" + std::to_string(ts);

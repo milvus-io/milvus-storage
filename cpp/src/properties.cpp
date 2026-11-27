@@ -548,7 +548,8 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "GCP fetches access tokens, and Talon "
                       "sends its request credentials through it. Talon derives the Broker request and origin settings "
                       "from the filesystem properties. fs.use_iam selects the Broker's own IAM identity; otherwise "
-                      "the supplied target identity is used.",
+                      "the supplied target identity is used. Talon S3 target-role requests can use the worker's Broker "
+                      "URL when this property is empty.",
                       "",
                       std::nullopt),
     REGISTER_PROPERTY(
