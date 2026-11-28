@@ -173,7 +173,18 @@ class StorageConan(ConanFile):
         # reference was never re-uploaded after the fix, only the @milvus/dev
         # channel was, so the pin must reference the channel explicitly.
         self.requires("boost/1.83.0@milvus/dev#b28dcffaf033d2578693838cde973f64", force=True)
-        self.requires("arrow/17.0.0@milvus/dev-2.6#c743ea7a6f2420ba5811b2be3df59892")
+        # arrow recipe revision from milvus-io/conanfiles#274, published on the
+        # @milvus/dev channel: #274 disambiguates the vendored Howard
+        # Hinnant date library's ostream operators vs libc++'s C++20
+        # std::chrono operator<< (GH-43094 port), which clang-17 (macos-15)
+        # otherwise rejects as ambiguous.
+        self.requires("arrow/17.0.0@milvus/dev#c139833378c1a1ea8a60adc742a63dce")
+        # thrift recipe revision from milvus-io/conanfiles#273: TEnumIterator
+        # only defined operator!=; new libc++ (llvm 21+/clang-23) std::map
+        # range-insert requires operator==, breaking arrow's generated
+        # parquet_types.cpp. Arrow's recipe requires plain thrift/0.17.0, so
+        # force=True overrides it to the fixed @milvus/dev revision.
+        self.requires("thrift/0.17.0@milvus/dev#09045d72ce15e25e36f3a32281e7715f", force=True)
         # Pin rapidjson to the newest cci snapshot, matching milvus-io/milvus
         # internal/core/conanfile.py. Arrow 17 pulls rapidjson/1.1.0
         # transitively, whose GenericStringRef::operator= assigns to the const
