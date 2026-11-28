@@ -46,18 +46,26 @@
 #include <unistd.h>
 
 #include <arrow/api.h>
+#include <arrow/c/bridge.h>
 #include <arrow/filesystem/localfs.h>
 #include <arrow/io/memory.h>
 #include <arrow/util/async_generator.h>
 #include <arrow/util/io_util.h>
 #include <nlohmann/json.hpp>
 #include <folly/ScopeGuard.h>
+#include <folly/executors/CPUThreadPoolExecutor.h>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/talon/talon_file_system_producer.h"
+#include "milvus-storage/format/lance/lance_common.h"
+#include "milvus-storage/format/lance/lance_table_writer.h"
+#include "milvus-storage/format/parquet/parquet_format_reader.h"
+#include "milvus-storage/format/parquet/parquet_writer.h"
+#include "milvus-storage/format/vortex/vortex_format_reader.h"
+#include "milvus-storage/format/vortex/vortex_writer.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 #include "milvus-storage/ffi_filesystem_metrics_c.h"
 #include "milvus-storage/ffi_talon_c.h"
@@ -65,6 +73,7 @@
 #include "milvus-storage/properties.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/writer.h"
+#include "recording_talon_server.h"
 #include "test_env.h"
 
 #if defined(__SANITIZE_ADDRESS__)
@@ -1228,8 +1237,7 @@ class TalonFileSystemServiceFreeTest : public ::testing::Test {
     return config;
   }
 
-  static arrow::Result<ArrowFileSystemPtr> Wrap(const ArrowFileSystemConfig& config,
-                                                std::shared_ptr<RecordingFileSystem> origin) {
+  static arrow::Result<ArrowFileSystemPtr> Wrap(const ArrowFileSystemConfig& config, ArrowFileSystemPtr origin) {
     ARROW_ASSIGN_OR_RAISE(auto talon_fs, TalonFileSystemProducer(config, std::move(origin)).Make());
     return std::make_shared<FileSystemProxy>(config.bucket_name, std::move(talon_fs));
   }
@@ -3730,6 +3738,352 @@ TEST_F(TalonFileSystemServiceFreeTest, InFlightTalonReadKeepsOriginAliveAfterFil
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   EXPECT_TRUE(origin_destroyed.load(std::memory_order_acquire));
+}
+
+TEST(TalonBridgeTest, ExactReadAcceptsSdkLimitAndRejectsLargerReads) {
+  RecordingTalonServer server;
+  ArrowFileSystemConfig config;
+  config.talon_coordinator = server.Address();
+  config.talon_block_size = 8U * 1024U * 1024U;
+  config.talon_max_idle_per_addr = 8;
+  ASSERT_AND_ASSIGN(auto client, talon::TalonClient::Make(config));
+  const auto max_exact_read_bytes = talon::TalonMaxExactReadBytes();
+  ASSERT_AND_ASSIGN(auto reader, client->OpenObject("aws", "test-bucket", "path/a",
+                                                    talon::TalonObjectStat{max_exact_read_bytes + 1, ""}));
+
+  std::vector<uint8_t> out(max_exact_read_bytes + 1, 0);
+  ASSERT_AND_ASSIGN(const auto bytes_read, reader.ReadExactAtAsync(0, max_exact_read_bytes, out.data()).result());
+  ASSERT_EQ(bytes_read, max_exact_read_bytes);
+  EXPECT_EQ(out.front(), 0x5a);
+  EXPECT_EQ(out[bytes_read - 1], 0x5a);
+  EXPECT_EQ(out.back(), 0);
+
+  const auto result = reader.ReadExactAtAsync(0, out.size(), out.data()).result();
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().IsInvalid()) << result.status().ToString();
+  EXPECT_NE(result.status().message().find("Talon exact read length exceeds " + std::to_string(max_exact_read_bytes) +
+                                           " bytes"),
+            std::string::npos);
+  const auto reads = server.Reads();
+  ASSERT_EQ(reads.size(), 1);
+  EXPECT_EQ(reads[0].msg_type, 12);
+  EXPECT_EQ(reads[0].length, max_exact_read_bytes);
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, ManifestAndDataFileFootersWithTheSameReadSizeUseDifferentOpcodes) {
+  constexpr uint64_t kProbeSize = 64 * 1024;
+  RecordingTalonServer server(/*fill_byte=*/0x5a, /*fail_reads=*/true);
+  auto config = Config();
+  config.talon_open_only = true;
+  config.talon_coordinator = server.Address();
+  ASSERT_AND_ASSIGN(auto dir, arrow::internal::TemporaryDir::Make("loon-talon-wire-"));
+  const auto root = dir->path().ToString();
+  const auto bucket_root = root + "/" + config.bucket_name;
+  auto origin = std::make_shared<TalonFixtureOrigin>(root);
+  ASSERT_STATUS_OK(origin->CreateDir(config.bucket_name));
+  ASSERT_AND_ASSIGN(auto fs, Wrap(config, origin));
+  auto writer_fs = std::make_shared<FileSystemProxy>(config.bucket_name, origin);
+
+  api::Properties properties;
+  ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_STORAGE_TYPE, "local"), std::nullopt);
+  ASSERT_EQ(api::SetValue(properties, PROPERTY_FS_ROOT_PATH, bucket_root.c_str()), std::nullopt);
+  auto props = std::make_shared<const api::Properties>(properties);
+  constexpr std::array<bool, 4> kIdOnly{true, false, false, false};
+  ASSERT_AND_ASSIGN(auto schema, CreateTestSchema(kIdOnly));
+  ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema, 0, true, 32768, 0, 0, kIdOnly));
+
+  // Force a real Lance manifest to exceed the remote adapter's 64 KiB block.
+  auto lance_schema = schema->WithMetadata(arrow::key_value_metadata({"padding"}, {std::string(72 * 1024, 'x')}));
+  auto lance_batch = arrow::RecordBatch::Make(lance_schema, batch->num_rows(), batch->columns());
+  lance::LanceTableWriter lance_writer("table", lance_schema, props, lance::LanceDataStorageFormat::V2_2);
+  ASSERT_STATUS_OK(lance_writer.Write(lance_batch));
+  ASSERT_AND_ASSIGN(auto lance_file, lance_writer.Close());
+  ASSERT_AND_ASSIGN(auto parsed, lance::ParseLanceUri(lance_file.path));
+  const auto remote_uri = "s3://" + config.bucket_name + "/table";
+  ASSERT_AND_ASSIGN(auto dataset, lance::BlockingDataset::Open(remote_uri, fs, lance::ToReaderOptions(config)));
+  const auto manifest_reads = server.Reads();
+  EXPECT_TRUE(std::any_of(manifest_reads.begin(), manifest_reads.end(),
+                          [](const auto& read) { return read.length == kProbeSize && read.offset > 0; }));
+  for (const auto& read : manifest_reads) {
+    EXPECT_EQ(read.msg_type, 10);  // GetVersionedRange.
+  }
+
+  ArrowSchema exported{};
+  ASSERT_STATUS_OK(arrow::ExportSchema(*lance_schema, &exported));
+  ASSERT_AND_ASSIGN(auto fragment, lance::BlockingFragmentReader::Open(*dataset, parsed.second, exported));
+  const auto fragment_reads = server.Reads();
+  ASSERT_GT(fragment_reads.size(), manifest_reads.size());
+  EXPECT_EQ(fragment_reads[manifest_reads.size()].length, kProbeSize);
+  for (size_t i = manifest_reads.size(); i < fragment_reads.size(); ++i) {
+    EXPECT_EQ(fragment_reads[i].msg_type, 12);  // GetExactRange.
+  }
+  ASSERT_AND_ASSIGN(auto stream, fragment->ReadAllAsStream(batch->num_rows()));
+  ASSERT_AND_ASSIGN(auto batches, arrow::ImportRecordBatchReader(&stream));
+  ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatchReader(batches.get()));
+  EXPECT_TRUE(table->column(0)->Equals(arrow::ChunkedArray(batch->column(0))));
+  EXPECT_EQ(server.Reads().size(), fragment_reads.size());
+
+  ASSERT_AND_ASSIGN(auto parquet_writer, parquet::ParquetFileWriter::Make(writer_fs, schema, "file.parquet", props));
+  ASSERT_STATUS_OK(parquet_writer->Write(batch));
+  ASSERT_AND_ASSIGN(auto parquet_file, parquet_writer->Close());
+  const auto file_size = parquet_file.Get<uint64_t>(api::kPropertyFileSize);
+  ASSERT_GT(file_size, kProbeSize);
+  folly::CPUThreadPoolExecutor executor{2};
+  for (const bool async : {false, true}) {
+    for (const auto footer_size : {uint64_t{0}, parquet_file.Get<uint64_t>(api::kPropertyFooterSize)}) {
+      SCOPED_TRACE(async);
+      SCOPED_TRACE(footer_size);
+      auto reader = std::make_shared<parquet::ParquetFormatReader>(
+          fs, "file.parquet", props, std::vector<std::string>{"id"}, KeyRetriever{}, file_size, footer_size);
+      const auto before_open = server.Reads().size();
+      ASSERT_STATUS_OK(async ? reader->open_async().via(&executor).get() : reader->open());
+      const auto footer_reads = server.Reads();
+      ASSERT_EQ(footer_reads.size(), before_open + 1);
+      const auto expected_size = footer_size == 0 ? kProbeSize : footer_size;
+      EXPECT_EQ(footer_reads.back().msg_type, 12);
+      EXPECT_EQ(footer_reads.back().length, expected_size);
+      EXPECT_EQ(footer_reads.back().offset, file_size - expected_size);
+      ASSERT_AND_ASSIGN(auto data, reader->read_with_range(0, batch->num_rows()));
+      ASSERT_AND_ASSIGN(auto parquet_table, data->ToTable());
+      EXPECT_TRUE(parquet_table->column(0)->Equals(arrow::ChunkedArray(batch->column(0))));
+      EXPECT_EQ(server.Reads().size(), footer_reads.size());
+    }
+  }
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, VortexFormatReaderTagsOnlyItsFooterRequests) {
+  RecordingTalonServer server(/*fill_byte=*/0x5a, /*fail_reads=*/true);
+  auto config = Config();
+  config.talon_open_only = true;
+  config.talon_coordinator = server.Address();
+  ASSERT_AND_ASSIGN(auto dir, arrow::internal::TemporaryDir::Make("loon-talon-vortex-"));
+  auto origin = std::make_shared<TalonFixtureOrigin>(dir->path().ToString());
+  ASSERT_STATUS_OK(origin->CreateDir(config.bucket_name));
+  ASSERT_AND_ASSIGN(auto fs, Wrap(config, origin));
+  auto writer_fs = std::make_shared<FileSystemProxy>(config.bucket_name, origin);
+  auto props = std::make_shared<const api::Properties>();
+  constexpr std::array<bool, 4> kIdOnly{true, false, false, false};
+  ASSERT_AND_ASSIGN(auto schema, CreateTestSchema(kIdOnly));
+  ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema, 0, true, 32768, 0, 0, kIdOnly));
+  ASSERT_AND_ASSIGN(auto writer, vortex::VortexFileWriter::Open(writer_fs, schema, "file.vx", props));
+  ASSERT_STATUS_OK(writer->Write(batch));
+  ASSERT_AND_ASSIGN(auto file, writer->Close());
+  const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
+  constexpr uint64_t kProbeSize = std::numeric_limits<uint16_t>::max();
+  ASSERT_GT(file_size, kProbeSize);
+
+  folly::CPUThreadPoolExecutor executor{2};
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    auto reader = std::make_shared<vortex::VortexFormatReader>(
+        fs, schema, "file.vx", props, std::vector<std::string>{"id"}, file_size, /*footer_size=*/0);
+    const auto before_open = server.Reads().size();
+    ASSERT_STATUS_OK(async ? reader->open_async().via(&executor).get() : reader->open());
+    const auto footer_reads = server.Reads();
+    ASSERT_EQ(footer_reads.size(), before_open + 1);
+    EXPECT_EQ(footer_reads.back().msg_type, 12);
+    EXPECT_EQ(footer_reads.back().length, kProbeSize);
+    EXPECT_EQ(footer_reads.back().offset, file_size - kProbeSize);
+    ASSERT_AND_ASSIGN(auto selected, reader->take_async({0}).via(&executor).get());
+    EXPECT_TRUE(selected->column(0)->Equals(arrow::ChunkedArray(batch->column(0)->Slice(0, 1))));
+    ASSERT_AND_ASSIGN(auto data, reader->read_with_range(0, batch->num_rows()));
+    ASSERT_AND_ASSIGN(auto table, data->ToTable());
+    EXPECT_TRUE(table->column(0)->Equals(arrow::ChunkedArray(batch->column(0))));
+    EXPECT_EQ(server.Reads().size(), footer_reads.size());
+  }
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, OpenOnlyRoutesOnlyTaggedFootersBelowSdkLimitThroughExactRead) {
+  constexpr int64_t kSmallFooterLen = 64 * 1024;
+  const auto max_exact_len = static_cast<int64_t>(talon::TalonMaxExactReadBytes());
+  const auto over_exact_len = max_exact_len + 1;
+  const auto object_size = 2 * max_exact_len;
+
+  for (const std::string& ns : {std::string(), std::string("meta-ns")}) {
+    SCOPED_TRACE(ns.empty() ? "default-namespace" : ns);
+    const uint8_t expected_exact_msg = ns.empty() ? 12 : 13;
+    const uint8_t expected_versioned_msg = ns.empty() ? 10 : 11;
+
+    RecordingTalonServer server(/*fill_byte=*/0x5a);
+    auto config = Config();
+    config.talon_mode = TalonMode::Full;
+    config.talon_open_only = true;
+    config.talon_coordinator = server.Address();
+    config.talon_namespace = ns;
+    config.talon_block_size = 8U * 1024U * 1024U;
+
+    auto origin = std::make_shared<RecordingFileSystem>("origin");
+    origin->input_file = std::make_shared<MetadataInputFile>(object_size);
+    ASSERT_AND_ASSIGN(auto fs, Wrap(config, origin));
+
+    arrow::fs::FileInfo large_info("prefix/large.parquet", arrow::fs::FileType::File);
+    large_info.set_size(object_size);
+    ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile(large_info));
+    auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(file.get());
+    ASSERT_NE(async_file, nullptr);
+
+    // 1. Footer read below the SDK limit via ReadAt -> exact read.
+    const int64_t footer_offset = object_size - kSmallFooterLen;
+    ASSERT_AND_ASSIGN(auto small_footer, talon::internal::ReadDataFileFooterAt(*file, footer_offset, kSmallFooterLen));
+    ASSERT_EQ(small_footer->size(), kSmallFooterLen);
+    EXPECT_EQ(small_footer->data()[0], 0x5a);
+
+    // 2. Footer read one byte below the cutoff via the caller-buffer API.
+    std::vector<uint8_t> exact_out(max_exact_len - 1, 0);
+    ASSERT_AND_ASSIGN(
+        const auto exact_bytes,
+        talon::internal::ReadDataFileFooterAtAsyncInto(*async_file, 1, exact_out.size(), exact_out.data()).result());
+    EXPECT_EQ(exact_bytes, exact_out.size());
+    EXPECT_EQ(exact_out.back(), 0x5a);
+
+    // 3. A footer request exactly at the cutoff uses ordinary routing.
+    const int64_t exact_boundary_offset = object_size - max_exact_len;
+    ASSERT_AND_ASSIGN(auto max_footer,
+                      talon::internal::ReadDataFileFooterAt(*file, exact_boundary_offset, max_exact_len));
+    ASSERT_EQ(max_footer->size(), max_exact_len);
+    EXPECT_EQ(max_footer->data()[0], 0x5a);
+
+    // 4. A larger range uses the ordinary versioned read.
+    std::vector<uint8_t> large_out(static_cast<size_t>(over_exact_len), 0);
+    ASSERT_AND_ASSIGN(
+        const auto large_bytes,
+        talon::internal::ReadDataFileFooterAtAsyncInto(*async_file, 0, over_exact_len, large_out.data()).result());
+    EXPECT_EQ(large_bytes, over_exact_len);
+    EXPECT_EQ(large_out[0], 0x5a);
+
+    // 5. The requested size controls routing even when EOF shortens the range.
+    ASSERT_AND_ASSIGN(auto clipped, talon::internal::ReadDataFileFooterAt(*file, footer_offset, over_exact_len));
+    ASSERT_EQ(clipped->size(), kSmallFooterLen);
+    EXPECT_EQ(clipped->data()[0], 0x5a);
+
+    // 6. An identical untagged request uses ordinary Talon routing.
+    ASSERT_AND_ASSIGN(auto ordinary, file->ReadAsync(footer_offset, kSmallFooterLen).result());
+    ASSERT_EQ(ordinary->size(), kSmallFooterLen);
+
+    // 7. Disabling Talon routes even footer requests through origin.
+    EXPECT_FALSE(talon::internal::ControlTalonForFile(file.get(), false));
+    ASSERT_AND_ASSIGN(auto origin_data, talon::internal::ReadDataFileFooterAt(*file, 0, 16));
+    EXPECT_EQ(origin_data->ToString(), std::string(16, 'x'));
+    ASSERT_STATUS_OK(file->Close());
+
+    // 8. Footer reads also use exact RPCs after lazy initialization.
+    origin->input_file = std::make_shared<MetadataInputFile>(4096);
+    ASSERT_AND_ASSIGN(auto small_file, fs->OpenInputFile("prefix/small.parquet"));
+    ASSERT_AND_ASSIGN(auto small_obj_buf, talon::internal::ReadDataFileFooterAt(*small_file, 0, 4096));
+    ASSERT_EQ(small_obj_buf->size(), 4096);
+    EXPECT_EQ(small_obj_buf->data()[0], 0x5a);
+    EXPECT_EQ(origin->input_file->async_metadata_read_calls.load(), 1);
+    ASSERT_STATUS_OK(small_file->Close());
+
+    const auto reads = server.Reads();
+    ASSERT_EQ(reads.size(), 7);
+    EXPECT_EQ(reads[0].msg_type, expected_exact_msg);
+    EXPECT_EQ(reads[0].offset, static_cast<uint64_t>(footer_offset));
+    EXPECT_EQ(reads[0].length, static_cast<uint64_t>(kSmallFooterLen));
+    EXPECT_EQ(reads[1].msg_type, expected_exact_msg);
+    EXPECT_EQ(reads[1].offset, 1);
+    EXPECT_EQ(reads[1].length, static_cast<uint64_t>(max_exact_len - 1));
+    EXPECT_EQ(reads[2].msg_type, expected_versioned_msg);
+    EXPECT_EQ(reads[2].offset, static_cast<uint64_t>(exact_boundary_offset));
+    EXPECT_EQ(reads[2].length, static_cast<uint64_t>(max_exact_len));
+    EXPECT_EQ(reads[3].msg_type, expected_versioned_msg);
+    EXPECT_EQ(reads[3].offset, 0);
+    EXPECT_EQ(reads[3].length, static_cast<uint64_t>(over_exact_len));
+    EXPECT_EQ(reads[4].msg_type, expected_versioned_msg);
+    EXPECT_EQ(reads[4].offset, static_cast<uint64_t>(footer_offset));
+    EXPECT_EQ(reads[4].length, static_cast<uint64_t>(kSmallFooterLen));
+    EXPECT_EQ(reads[5].msg_type, expected_versioned_msg);
+    EXPECT_EQ(reads[5].offset, static_cast<uint64_t>(footer_offset));
+    EXPECT_EQ(reads[5].length, static_cast<uint64_t>(kSmallFooterLen));
+    EXPECT_EQ(reads[6].msg_type, expected_exact_msg);
+    EXPECT_EQ(reads[6].offset, 0);
+    EXPECT_EQ(reads[6].length, 4096);
+  }
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, AllModeKeepsOrdinaryReadsForSmallRanges) {
+  constexpr int64_t kLargeSize = 2 * 1024 * 1024;
+  constexpr int64_t kSmallLen = 64 * 1024;
+
+  for (const auto mode : {TalonMode::Full, TalonMode::SmallReads}) {
+    SCOPED_TRACE(static_cast<int>(mode));
+    RecordingTalonServer server(/*fill_byte=*/0x5a);
+    auto config = Config();
+    config.talon_mode = mode;
+    config.talon_open_only = false;
+    config.talon_small_read_threshold = static_cast<uint32_t>(talon::TalonMaxExactReadBytes());
+    config.talon_coordinator = server.Address();
+    config.talon_block_size = 8U * 1024U * 1024U;
+
+    auto origin = std::make_shared<RecordingFileSystem>("origin");
+    origin->input_file = std::make_shared<MetadataInputFile>(kLargeSize);
+    ASSERT_AND_ASSIGN(auto fs, Wrap(config, origin));
+
+    arrow::fs::FileInfo info("prefix/all.parquet", arrow::fs::FileType::File);
+    info.set_size(kLargeSize);
+    ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile(info));
+    auto* const async_file = dynamic_cast<NonBlockingRandomAccessFile*>(file.get());
+    ASSERT_NE(async_file, nullptr);
+
+    ASSERT_AND_ASSIGN(auto buf1, talon::internal::ReadDataFileFooterAt(*file, kLargeSize - kSmallLen, kSmallLen));
+    ASSERT_EQ(buf1->size(), kSmallLen);
+    EXPECT_EQ(buf1->data()[0], 0x5a);
+
+    ASSERT_AND_ASSIGN(auto buf2, file->ReadAsync(0, kSmallLen).result());
+    ASSERT_EQ(buf2->size(), kSmallLen);
+    EXPECT_EQ(buf2->data()[0], 0x5a);
+
+    std::vector<uint8_t> out(static_cast<size_t>(kSmallLen), 0);
+    ASSERT_AND_ASSIGN(const auto n, async_file->ReadAtAsyncInto(kSmallLen, kSmallLen, out.data()).result());
+    EXPECT_EQ(n, kSmallLen);
+    EXPECT_EQ(out[0], 0x5a);
+    ASSERT_STATUS_OK(file->Close());
+
+    const auto reads = server.Reads();
+    ASSERT_EQ(reads.size(), 3);
+    for (const auto& read : reads) {
+      EXPECT_EQ(read.msg_type, 10);  // GetVersionedRange, never GetExactRange (12).
+    }
+  }
+}
+
+TEST_F(TalonFileSystemServiceFreeTest, OpenOnlyExactReadFailureFallsBackToOrigin) {
+  constexpr int64_t kLargeSize = 2 * 1024 * 1024;
+  constexpr int64_t kFooterLen = 4096;
+
+  RecordingTalonServer server(/*fill_byte=*/0x5a, /*fail_reads=*/true);
+  auto config = Config();
+  config.talon_mode = TalonMode::Full;
+  config.talon_open_only = true;
+  config.talon_coordinator = server.Address();
+  config.talon_block_size = 8U * 1024U * 1024U;
+
+  auto origin = std::make_shared<RecordingFileSystem>("origin");
+  origin->input_file = std::make_shared<MetadataInputFile>(kLargeSize);
+  ASSERT_AND_ASSIGN(auto fs, Wrap(config, origin));
+
+  arrow::fs::FileInfo info("prefix/fallback.parquet", arrow::fs::FileType::File);
+  info.set_size(kLargeSize);
+  ASSERT_AND_ASSIGN(auto file, fs->OpenInputFile(info));
+
+  ASSERT_AND_ASSIGN(auto buf, talon::internal::ReadDataFileFooterAt(*file, kLargeSize - kFooterLen, kFooterLen));
+  ASSERT_EQ(buf->size(), kFooterLen);
+  EXPECT_EQ(buf->ToString(), std::string(kFooterLen, 'x'));
+  ASSERT_STATUS_OK(file->Close());
+
+  const auto reads = server.Reads();
+  ASSERT_EQ(reads.size(), 1);
+  EXPECT_EQ(reads[0].msg_type, 12);  // GetExactRange.
+  EXPECT_EQ(reads[0].offset, kLargeSize - kFooterLen);
+  EXPECT_EQ(reads[0].length, kFooterLen);
+  EXPECT_EQ(origin->input_file->read_calls.load(), 1);
+  EXPECT_EQ(origin->input_open_calls, 1);
+
+  ASSERT_AND_ASSIGN(const auto metrics, FindMetricsSource(fs, kTalonMetricsSource));
+  ASSERT_NE(metrics, nullptr);
+  EXPECT_EQ(metrics->GetReadCount(), 1);
+  EXPECT_EQ(metrics->GetFailedCount(), 1);
+  EXPECT_EQ(metrics->GetReadBytes(), 0);
 }
 
 }  // namespace milvus_storage::test

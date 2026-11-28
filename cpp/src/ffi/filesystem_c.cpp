@@ -450,12 +450,13 @@ LoonFFIResult loon_filesystem_reader_supports_async(FileSystemReaderHandle handl
   RETURN_UNREACHABLE();
 }
 
-LoonFFIResult loon_filesystem_reader_readat_async(FileSystemReaderHandle handle,
-                                                  uint64_t offset,
-                                                  uint64_t nbytes,
-                                                  uint8_t* out_data,
-                                                  LoonFileSystemReadAsyncCallback callback,
-                                                  void* user_data) {
+static LoonFFIResult ReadAtAsync(FileSystemReaderHandle handle,
+                                 uint64_t offset,
+                                 uint64_t nbytes,
+                                 uint8_t* out_data,
+                                 LoonFileSystemReadAsyncCallback callback,
+                                 void* user_data,
+                                 bool is_data_file_footer) {
   try {
     if (!handle || !out_data || nbytes == 0 || !callback) {
       RETURN_ERROR(LOON_INVALID_ARGS,
@@ -468,7 +469,9 @@ LoonFFIResult loon_filesystem_reader_readat_async(FileSystemReaderHandle handle,
       RETURN_ERROR(LOON_NOT_SUPPORT, "Reader does not support async read-at");
     }
 
-    auto future = async_file->ReadAtAsyncInto(offset, nbytes, out_data);
+    auto future = is_data_file_footer
+                      ? talon::internal::ReadDataFileFooterAtAsyncInto(*async_file, offset, nbytes, out_data)
+                      : async_file->ReadAtAsyncInto(offset, nbytes, out_data);
     future.AddCallback(
         [input_file, callback, user_data, nbytes, offset](const arrow::Result<int64_t>& read_result) mutable {
           (void)input_file;
@@ -498,6 +501,25 @@ LoonFFIResult loon_filesystem_reader_readat_async(FileSystemReaderHandle handle,
   }
 
   RETURN_UNREACHABLE();
+}
+
+LoonFFIResult loon_filesystem_reader_readat_async(FileSystemReaderHandle handle,
+                                                  uint64_t offset,
+                                                  uint64_t nbytes,
+                                                  uint8_t* out_data,
+                                                  LoonFileSystemReadAsyncCallback callback,
+                                                  void* user_data) {
+  return ReadAtAsync(handle, offset, nbytes, out_data, callback, user_data, /*is_data_file_footer=*/false);
+}
+
+// Internal Rust bridge entry point. Footer intent belongs to the individual request.
+extern "C" LoonFFIResult loon_filesystem_reader_read_data_file_footer_async(FileSystemReaderHandle handle,
+                                                                            uint64_t offset,
+                                                                            uint64_t nbytes,
+                                                                            uint8_t* out_data,
+                                                                            LoonFileSystemReadAsyncCallback callback,
+                                                                            void* user_data) {
+  return ReadAtAsync(handle, offset, nbytes, out_data, callback, user_data, /*is_data_file_footer=*/true);
 }
 
 /**

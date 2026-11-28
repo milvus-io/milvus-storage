@@ -83,7 +83,10 @@ static arrow::Result<std::shared_ptr<::parquet::arrow::FileReader>> create_parqu
     std::shared_ptr<::parquet::FileMetaData> metadata = nullptr,
     uint64_t file_size = 0,
     uint64_t footer_size = 0);
-static arrow::Future<std::shared_ptr<arrow::Buffer>> read_file_async_and_transfer(
+static arrow::Status open_parquet_with_footer(::parquet::arrow::FileReaderBuilder& builder,
+                                              const std::shared_ptr<arrow::io::RandomAccessFile>& file,
+                                              const ::parquet::ReaderProperties& reader_props);
+static arrow::Future<std::shared_ptr<arrow::Buffer>> read_footer_range_async(
     const std::shared_ptr<arrow::io::RandomAccessFile>& file,
     int64_t position,
     int64_t nbytes,
@@ -290,7 +293,8 @@ static std::shared_ptr<arrow::Buffer> try_read_footer_buffer(const std::shared_p
       return nullptr;
     }
     auto buf = std::move(maybe_buf).ValueOrDie();
-    auto read_result = async_file->ReadAtAsyncInto(offset, size, buf->mutable_data()).result();
+    auto read_result =
+        talon::internal::ReadDataFileFooterAtAsyncInto(*async_file, offset, size, buf->mutable_data()).result();
     if (!read_result.ok()) {
       return nullptr;
     }
@@ -382,7 +386,11 @@ static arrow::Result<std::shared_ptr<::parquet::arrow::FileReader>> create_parqu
     metadata = try_parse_footer_metadata(footer_buffer, reader_props);
   }
 
-  ARROW_RETURN_NOT_OK(builder.Open(parquet_file, reader_props, metadata));
+  if (metadata) {
+    ARROW_RETURN_NOT_OK(builder.Open(parquet_file, reader_props, metadata));
+  } else {
+    ARROW_RETURN_NOT_OK(open_parquet_with_footer(builder, parquet_file, reader_props));
+  }
   ARROW_RETURN_NOT_OK(
       builder.memory_pool(arrow::default_memory_pool())->properties(arrow_reader_props)->Build(&result));
   // Also applies on cache hits, where metadata was injected and no footer was read.
@@ -615,7 +623,7 @@ arrow::Status ParquetFormatReader::finish_open(std::shared_ptr<::parquet::arrow:
   }
 }
 
-static arrow::Future<std::shared_ptr<arrow::Buffer>> read_file_async_and_transfer(
+static arrow::Future<std::shared_ptr<arrow::Buffer>> read_footer_range_async(
     const std::shared_ptr<arrow::io::RandomAccessFile>& file,
     const int64_t position,
     const int64_t nbytes,
@@ -631,7 +639,9 @@ static arrow::Future<std::shared_ptr<arrow::Buffer>> read_file_async_and_transfe
       return arrow::Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(maybe_buffer.status());
     }
     auto buffer = std::move(maybe_buffer).ValueUnsafe();
-    return transfer_arrow_future(async_file->ReadAtAsyncInto(position, nbytes, buffer->mutable_data()), executor)
+    return transfer_arrow_future(
+               talon::internal::ReadDataFileFooterAtAsyncInto(*async_file, position, nbytes, buffer->mutable_data()),
+               executor)
         .Then([buffer = std::move(buffer),
                nbytes](const int64_t bytes_read) mutable -> arrow::Result<std::shared_ptr<arrow::Buffer>> {
           if (bytes_read < 0 || bytes_read > nbytes) {
@@ -646,18 +656,20 @@ static arrow::Future<std::shared_ptr<arrow::Buffer>> read_file_async_and_transfe
   return transfer_arrow_future(file->ReadAsync(file->io_context(), position, nbytes), executor);
 }
 
-// During open, route Parquet's ReadAsync through the provider-native async
-// interface, then transfer completion to the caller's Folly executor before
-// Parquet attaches its CPU continuations. After open, reads are delegated
-// unchanged to the underlying file.
+// Arrow's native open issues the footer reads, including encrypted footers.
+// Mark those requests while open is in progress. Async reads use the
+// provider-native path and transfer completion to the caller's executor.
 class ParquetOpenFile final : public arrow::io::RandomAccessFile {
   public:
   ParquetOpenFile(std::shared_ptr<arrow::io::RandomAccessFile> file,
                   std::shared_ptr<arrow::internal::Executor> executor,
-                  const int64_t file_size)
+                  std::optional<int64_t> file_size)
       : file_(std::move(file)), executor_(std::move(executor)), file_size_(file_size) {}
 
-  void FinishOpen() { executor_.reset(); }
+  void FinishOpen() {
+    reading_footer_ = false;
+    executor_.reset();
+  }
 
   arrow::Status Close() override { return file_->Close(); }
   arrow::Status Abort() override { return file_->Abort(); }
@@ -676,18 +688,26 @@ class ParquetOpenFile final : public arrow::io::RandomAccessFile {
     return file_->ReadMetadataAsync(io_context);
   }
   arrow::Status Seek(int64_t position) override { return file_->Seek(position); }
-  arrow::Result<int64_t> GetSize() override { return file_size_; }
+  arrow::Result<int64_t> GetSize() override {
+    if (file_size_) {
+      return *file_size_;
+    }
+    return file_->GetSize();
+  }
   arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
     return file_->ReadAt(position, nbytes, out);
   }
   arrow::Result<std::shared_ptr<arrow::Buffer>> ReadAt(int64_t position, int64_t nbytes) override {
+    if (reading_footer_) {
+      return talon::internal::ReadDataFileFooterAt(*file_, position, nbytes);
+    }
     return file_->ReadAt(position, nbytes);
   }
   arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
                                                           int64_t position,
                                                           int64_t nbytes) override {
     if (executor_) {
-      return read_file_async_and_transfer(file_, position, nbytes, executor_);
+      return read_footer_range_async(file_, position, nbytes, executor_);
     }
     return file_->ReadAsync(io_context, position, nbytes);
   }
@@ -708,8 +728,18 @@ class ParquetOpenFile final : public arrow::io::RandomAccessFile {
   private:
   std::shared_ptr<arrow::io::RandomAccessFile> file_;
   std::shared_ptr<arrow::internal::Executor> executor_;
-  int64_t file_size_;
+  std::optional<int64_t> file_size_;
+  bool reading_footer_ = true;
 };
+
+static arrow::Status open_parquet_with_footer(::parquet::arrow::FileReaderBuilder& builder,
+                                              const std::shared_ptr<arrow::io::RandomAccessFile>& file,
+                                              const ::parquet::ReaderProperties& reader_props) {
+  auto footer_file = std::make_shared<ParquetOpenFile>(file, nullptr, std::nullopt);
+  ARROW_RETURN_NOT_OK(builder.Open(footer_file, reader_props));
+  footer_file->FinishOpen();
+  return arrow::Status::OK();
+}
 
 static std::optional<uint32_t> try_parse_footer_length(const std::shared_ptr<arrow::Buffer>& buffer,
                                                        const int64_t expected_read_size,
@@ -775,7 +805,7 @@ static arrow::Future<std::shared_ptr<::parquet::FileMetaData>> read_footer_async
 
   // Read exactly the hinted suffix. A correct writer-provided hint normally
   // contains both the metadata and the 8-byte Parquet trailer in one request.
-  auto footer_future = read_file_async_and_transfer(file, file_size - footer_size, footer_size, executor);
+  auto footer_future = read_footer_range_async(file, file_size - footer_size, footer_size, executor);
   return footer_future.Then([file, file_size, footer_size, reader_properties = std::move(reader_properties),
                              executor](const std::shared_ptr<arrow::Buffer>& footer_buffer) mutable -> MetadataFuture {
     auto maybe_metadata_length = try_parse_footer_length(footer_buffer, footer_size, file_size);
@@ -800,7 +830,7 @@ static arrow::Future<std::shared_ptr<::parquet::FileMetaData>> read_footer_async
     // Read only the missing metadata range; the trailer need not be
     // fetched again.
     const auto metadata_offset = file_size - kParquetFooterTrailerSize - static_cast<int64_t>(metadata_length);
-    auto metadata_future = read_file_async_and_transfer(file, metadata_offset, metadata_length, executor);
+    auto metadata_future = read_footer_range_async(file, metadata_offset, metadata_length, executor);
     return metadata_future.Then([reader_properties = std::move(reader_properties),
                                  metadata_length](const std::shared_ptr<arrow::Buffer>& metadata_buffer) {
       return try_parse_plain_footer_metadata(metadata_buffer, metadata_length, reader_properties);

@@ -48,7 +48,10 @@ use crate::filesystem_c::{
     loon_filesystem_reader_control_talon, loon_filesystem_reader_destroy,
     loon_filesystem_reader_readat, reader_supports_async,
 };
-use crate::filesystem_c::{LoonFFIResult, loon_filesystem_reader_readat_async};
+use crate::filesystem_c::{
+    LoonFFIResult, loon_filesystem_reader_read_data_file_footer_async,
+    loon_filesystem_reader_readat_async,
+};
 use crate::lance_ffi::FileSystemWrapper;
 
 struct ObjectStoreAsyncReadCallbackState {
@@ -116,6 +119,7 @@ async fn read_object_store_async_via_ffi(
     reader: Arc<ReaderHandle>,
     location: ObjectPath,
     range: Range<u64>,
+    is_footer_read: bool,
 ) -> object_store::Result<Bytes> {
     let length = range.end - range.start;
     let expected_len = usize::try_from(length).map_err(|source| object_store::Error::Generic {
@@ -138,8 +142,13 @@ async fn read_object_store_async_via_ffi(
     let state_ptr = Box::into_raw(state);
 
     {
+        let read = if is_footer_read {
+            loon_filesystem_reader_read_data_file_footer_async
+        } else {
+            loon_filesystem_reader_readat_async
+        };
         let mut result = unsafe {
-            loon_filesystem_reader_readat_async(
+            read(
                 reader.as_ptr(),
                 range.start,
                 length,
@@ -717,7 +726,13 @@ impl FilesystemObjectStore {
         if let Some(reader) = &cached
             && reader.supports_async
         {
-            return read_object_store_async_via_ffi(reader.clone(), location.clone(), range).await;
+            return read_object_store_async_via_ffi(
+                reader.clone(),
+                location.clone(),
+                range,
+                is_footer_read,
+            )
+            .await;
         }
 
         enum ReadOutcome {
@@ -803,7 +818,8 @@ impl FilesystemObjectStore {
 
         match outcome {
             ReadOutcome::Async(reader) => {
-                read_object_store_async_via_ffi(reader, location.clone(), range).await
+                read_object_store_async_via_ffi(reader, location.clone(), range, is_footer_read)
+                    .await
             }
             ReadOutcome::Complete(bytes) => Ok(bytes),
         }

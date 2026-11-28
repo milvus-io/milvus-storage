@@ -48,6 +48,8 @@
 #include "milvus-storage/format/vortex/vortex_translater.h"
 #include "milvus-storage/format/vortex/vortex_types.h"
 #include "milvus-storage/format/vortex/vortex_writer.h"
+#include "talon/talon_bridge.h"
+#include "recording_talon_server.h"
 #include "test_env.h"
 
 namespace milvus_storage {
@@ -545,6 +547,62 @@ TEST_F(VortexLocalFormatTest, TestFooterReaderMissingFilePreservesEnoent) {
   EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
 }
 
+TEST_F(VortexLocalFormatTest, TestFooterReaderRefillsLargeUnknownFooter) {
+  constexpr uint64_t kInitialTailSize = 256 * 1024;
+  constexpr const char* kSparsePath = "test-file.vx.sparse";
+  // Make the serialized schema larger than the initial tail.
+  const auto& ids = record_batches_.front()->column(0);
+  const std::string name_suffix(20 * 1024, 'x');
+  arrow::FieldVector fields;
+  arrow::ArrayVector columns;
+  for (int i = 0; i < 16; ++i) {
+    fields.push_back(arrow::field(std::to_string(i) + name_suffix, ids->type()));
+    columns.push_back(ids);
+  }
+  const auto schema = arrow::schema(std::move(fields));
+  const auto batch = arrow::RecordBatch::Make(schema, ids->length(), std::move(columns));
+  ASSERT_AND_ASSIGN(auto writer, VortexFileWriter::Open(file_system_, schema, test_file_name_,
+                                                        std::make_shared<const api::Properties>(properties_)));
+  ASSERT_STATUS_OK(writer->Write(batch));
+  ASSERT_AND_ASSIGN(auto cgfile, writer->Close());
+  const auto file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
+  const auto footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
+  const auto tail_size = footer_size + VortexEofSize();
+  ASSERT_GT(tail_size, kInitialTailSize);
+  ASSERT_LT(tail_size, file_size);
+
+  auto sparse_fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+  VortexFooterReader unknown(sparse_fs, kSparsePath, test_file_name_, file_size);
+  ASSERT_STATUS_OK(unknown.Open(file_system_, false));
+  EXPECT_EQ(unknown.footer_size(), footer_size);
+  EXPECT_EQ(unknown.rows(), static_cast<uint64_t>(batch->num_rows()));
+  ASSERT_NE(unknown.file_schema(), nullptr);
+  EXPECT_TRUE(unknown.file_schema()->Equals(*schema));
+
+  ASSERT_AND_ASSIGN(auto sparse_file, sparse_fs->GetInMemoryFile(kSparsePath));
+  const auto ranges = sparse_file->WriteRanges();
+  ASSERT_FALSE(ranges.empty());
+  EXPECT_EQ(ranges.front().length, kInitialTailSize);
+  ASSERT_GT(ranges.size(), 1u);
+  auto next_end = file_size;
+  for (const auto& range : ranges) {
+    EXPECT_GT(range.length, 0u);
+    EXPECT_EQ(range.offset + range.length, next_end);
+    next_end = range.offset;
+  }
+  EXPECT_LE(next_end, file_size - tail_size);
+
+  auto known_sparse_fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+  auto known = MakeFooterReader(cgfile, known_sparse_fs);
+  ASSERT_STATUS_OK(known->Open(file_system_, false));
+  EXPECT_EQ(known->footer_size(), footer_size);
+  ASSERT_AND_ASSIGN(auto known_sparse_file, known_sparse_fs->GetInMemoryFile(kSparsePath));
+  const auto known_ranges = known_sparse_file->WriteRanges();
+  ASSERT_EQ(known_ranges.size(), 1u);
+  EXPECT_EQ(known_ranges.front().offset, file_size - tail_size);
+  EXPECT_EQ(known_ranges.front().length, tail_size);
+}
+
 TEST_F(VortexLocalFormatTest, TestFooterReaderDoesNotPrefetchHeaderRangeWhenFooterSizeKnown) {
   ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile());
   const auto file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
@@ -601,6 +659,51 @@ TEST_F(VortexLocalFormatTest, TestFooterReaderOptionalZoneMapLoadControlsPruning
   ASSERT_AND_ASSIGN(auto pruned_row_groups,
                     zonemap_footer_reader->PruneRowGroups("id >= 1000000", candidate_row_group_ids));
   ASSERT_TRUE(pruned_row_groups.empty());
+}
+
+TEST_F(VortexLocalFormatTest, TalonFooterReaderUsesOrdinaryRoutingForZoneMaps) {
+  test::RecordingTalonServer server(/*fill_byte=*/0x5a, /*fail_reads=*/true);
+  ASSERT_AND_ASSIGN(auto dir, arrow::internal::TemporaryDir::Make("loon-talon-vortex-zonemap-"));
+  auto origin = std::make_shared<test::TalonFixtureOrigin>(dir->path().ToString());
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderAWS;
+  config.bucket_name = "test-bucket";
+  config.talon_mode = TalonMode::Full;
+  config.talon_open_only = true;
+  config.talon_coordinator = server.Address();
+  ASSERT_STATUS_OK(origin->CreateDir(config.bucket_name));
+  ASSERT_AND_ASSIGN(auto wrapped, TalonFileSystemProducer(config, origin).Make());
+  auto fs = std::make_shared<FileSystemProxy>(config.bucket_name, std::move(wrapped));
+  auto writer_fs = std::make_shared<FileSystemProxy>(config.bucket_name, origin);
+  api::Properties properties;
+  ASSERT_EQ(api::SetValue(properties, PROPERTY_WRITER_VORTEX_FORMAT_VERSION, "2"), std::nullopt);
+  ASSERT_EQ(api::SetValue(properties, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "true"), std::nullopt);
+  ASSERT_EQ(api::SetValue(properties, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, "131072"), std::nullopt);
+  const auto props = std::make_shared<const api::Properties>(properties);
+  ASSERT_AND_ASSIGN(auto writer, VortexFileWriter::Open(writer_fs, schema_, test_file_name_, props));
+  for (const auto& batch : record_batches_) {
+    ASSERT_STATUS_OK(writer->Write(batch));
+  }
+  ASSERT_AND_ASSIGN(auto file, writer->Close());
+  const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
+  constexpr uint64_t kProbeSize = 256 * 1024;
+  ASSERT_GT(file_size, kProbeSize);
+  auto sparse_fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+  VortexFooterReader reader(sparse_fs, "sparse.vx", test_file_name_, file_size);
+  ASSERT_STATUS_OK(reader.Open(fs, /*load_zonemap=*/true));
+  EXPECT_EQ(reader.rows(), recordBatchsRows());
+  const auto reads = server.Reads();
+  ASSERT_GT(reads.size(), 1);
+  EXPECT_EQ(reads.front().msg_type, 12);  // GetExactRange.
+  EXPECT_EQ(reads.front().offset, file_size - kProbeSize);
+  EXPECT_EQ(reads.front().length, kProbeSize);
+  for (size_t i = 1; i < reads.size(); ++i) {
+    EXPECT_EQ(reads[i].msg_type, 10);  // GetVersionedRange.
+    EXPECT_LT(reads[i].length, talon::TalonMaxExactReadBytes());
+  }
+  ASSERT_AND_ASSIGN(auto pruned, reader.PruneRowGroups("id >= 1000000", {0}));
+  EXPECT_TRUE(pruned.empty());
 }
 
 TEST_F(VortexLocalFormatTest, TestPlannerBuildsRangeAndTakePlans) {
