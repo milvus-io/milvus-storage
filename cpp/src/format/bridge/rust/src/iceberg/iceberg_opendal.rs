@@ -147,7 +147,9 @@ fn validate_raw_uri_path(uri: &str) -> Result<()> {
         Ok(_) => Ok(()),
         Err(object_store::path::Error::BadSegment { path, .. }) => {
             if path.split('/').any(|segment| segment == "..") {
-                return Err(invalid("Iceberg object path must not contain parent traversal"));
+                return Err(invalid(
+                    "Iceberg object path must not contain parent traversal",
+                ));
             }
             let without_current = path
                 .split('/')
@@ -214,8 +216,12 @@ fn parse_remote_uri(uri: &str) -> Result<(SchemeFamily, String, String)> {
 /// bucket/container, or the allowed local root. Manifest lists, manifests,
 /// delete files, and data files must all resolve through this same binding.
 /// This prevents table metadata from redirecting reads to another tenant.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum IcebergUriBinding {
+    Source {
+        #[serde(skip)]
+        filesystem: Option<cxx::SharedPtr<crate::lance_ffi::FileSystemWrapper>>,
+    },
     Local {
         root: PathBuf,
     },
@@ -225,7 +231,41 @@ pub(crate) enum IcebergUriBinding {
     },
 }
 
+impl fmt::Debug for IcebergUriBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Runtime authority and source locations are not diagnostics.
+        formatter.write_str(match self {
+            Self::Source { .. } => "Source",
+            Self::Local { .. } => "Local",
+            Self::Remote { .. } => "Remote",
+        })
+    }
+}
+
+fn resolve_source_uri_path(
+    filesystem: &crate::lance_ffi::FileSystemWrapper,
+    uri: &str,
+) -> Result<Option<String>> {
+    let result = crate::iceberg_ffi::resolve_source_uri(filesystem, uri);
+    if result.error_code != 0 {
+        return Err(
+            Error::new(ErrorKind::Unexpected, "source URI validation failed").with_source(
+                crate::filesystem_c::LoonFFIError::from_code(
+                    result.error_code,
+                    "source URI binding",
+                    "native validation failed",
+                ),
+            ),
+        );
+    }
+    Ok(result.is_source.then_some(result.path))
+}
+
 impl IcebergUriBinding {
+    pub(crate) fn is_source(&self) -> bool {
+        matches!(self, Self::Source { .. })
+    }
+
     /// Establish the binding from the initial metadata location and validate
     /// that the location itself is reachable through the selected filesystem.
     pub(crate) fn new(metadata_location: &str, options: &FilesystemReadOptions) -> Result<Self> {
@@ -247,6 +287,18 @@ impl IcebergUriBinding {
     /// the generic filesystem-backed OpenDAL access is allowed to receive.
     pub(crate) fn relative_path(&self, uri: &str) -> Result<String> {
         match self {
+            Self::Source { filesystem } => {
+                let filesystem =
+                    filesystem
+                        .as_ref()
+                        .and_then(|fs| fs.as_ref())
+                        .ok_or_else(|| {
+                            invalid("source URI binding is missing its runtime filesystem")
+                        })?;
+                resolve_source_uri_path(filesystem, uri)?.ok_or_else(|| {
+                    invalid("source URI binding lost its native authorization context")
+                })
+            }
             Self::Remote { family, authority } => {
                 let (candidate_family, candidate_authority, path) = parse_remote_uri(uri)?;
                 if candidate_family != *family || candidate_authority != *authority {
@@ -305,7 +357,11 @@ fn local_relative_path(root: &Path, uri: &str) -> Result<String> {
 /// type. The C++ bridge later recovers detailed filesystem status from that
 /// source chain.
 fn from_filesystem_opendal_error(error: opendal::Error) -> Error {
-    Error::new(ErrorKind::Unexpected, "filesystem-backed OpenDAL I/O failed").with_source(error)
+    Error::new(
+        ErrorKind::Unexpected,
+        "filesystem-backed OpenDAL I/O failed",
+    )
+    .with_source(error)
 }
 
 /// Return one consistent Iceberg error for every mutation entry point.
@@ -358,10 +414,7 @@ impl IcebergFilesystemStorageFactory {
 
 #[typetag::serde(name = "IcebergFilesystemStorageFactory")]
 impl iceberg::io::StorageFactory for IcebergFilesystemStorageFactory {
-    fn build(
-        &self,
-        _config: &iceberg::io::StorageConfig,
-    ) -> Result<Arc<dyn iceberg::io::Storage>> {
+    fn build(&self, _config: &iceberg::io::StorageConfig) -> Result<Arc<dyn iceberg::io::Storage>> {
         let filesystem = self.filesystem.clone().ok_or_else(|| {
             invalid("filesystem-backed Iceberg factory is missing its runtime filesystem")
         })?;
@@ -515,7 +568,16 @@ pub(crate) fn build_filesystem_file_io(
     read_options: HashMap<String, String>,
 ) -> Result<(iceberg::io::FileIO, IcebergUriBinding)> {
     let options = FilesystemReadOptions::parse(read_options)?;
-    let binding = IcebergUriBinding::new(metadata_location, &options)?;
+    let native = filesystem
+        .as_ref()
+        .ok_or_else(|| invalid("missing runtime filesystem"))?;
+    let binding = if resolve_source_uri_path(native, metadata_location)?.is_some() {
+        IcebergUriBinding::Source {
+            filesystem: Some(filesystem.clone()),
+        }
+    } else {
+        IcebergUriBinding::new(metadata_location, &options)?
+    };
     let factory = IcebergFilesystemStorageFactory::new(filesystem, binding.clone());
     let file_io = iceberg::io::FileIOBuilder::new(Arc::new(factory)).build();
     Ok((file_io, binding))
@@ -526,6 +588,19 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    #[test]
+    fn serialized_source_binding_cannot_recreate_runtime_authority() {
+        let source = IcebergUriBinding::Source { filesystem: None };
+        let serialized = serde_json::to_string(&source).unwrap();
+        let restored: IcebergUriBinding = serde_json::from_str(&serialized).unwrap();
+        assert!(restored.is_source());
+        assert!(
+            restored
+                .relative_path("https://acct.blob.core.windows.net/tables/team/table/data.parquet")
+                .is_err()
+        );
+    }
 
     #[test]
     fn remote_binding_accepts_all_documented_scheme_aliases() {
@@ -540,8 +615,7 @@ mod tests {
                 let metadata = format!("{metadata_scheme}://bucket/table/metadata/v1.json");
                 let binding = IcebergUriBinding::new(&metadata, &options).unwrap();
                 for referenced_scheme in aliases {
-                    let referenced =
-                        format!("{referenced_scheme}://bucket/table/metadata/m.avro");
+                    let referenced = format!("{referenced_scheme}://bucket/table/metadata/m.avro");
                     assert_eq!(
                         binding.relative_path(&referenced).unwrap(),
                         "table/metadata/m.avro"
@@ -654,10 +728,7 @@ mod tests {
             "s3://bucket/table/./metadata/m.avro",
             "s3://bucket/table/%2E/metadata/m.avro",
         ] {
-            assert_eq!(
-                binding.relative_path(uri).unwrap(),
-                "table/metadata/m.avro"
-            );
+            assert_eq!(binding.relative_path(uri).unwrap(), "table/metadata/m.avro");
         }
     }
 
@@ -695,9 +766,8 @@ mod tests {
             IcebergUriBinding::new("abfss://container/table/metadata/v1.json", &options).unwrap();
 
         for scheme in ["azure", "abfs", "abfss", "wasb", "wasbs"] {
-            let uri = format!(
-                "{scheme}://container@account.blob.core.windows.net/table/metadata/m.avro"
-            );
+            let uri =
+                format!("{scheme}://container@account.blob.core.windows.net/table/metadata/m.avro");
             assert_eq!(
                 binding.relative_path(&uri).unwrap(),
                 "table/metadata/m.avro"
@@ -746,10 +816,7 @@ mod tests {
             "file:///data/root/table/./metadata/m.avro",
             "file:///data/root/table/%2E/metadata/m.avro",
         ] {
-            assert_eq!(
-                binding.relative_path(uri).unwrap(),
-                "table/metadata/m.avro"
-            );
+            assert_eq!(binding.relative_path(uri).unwrap(), "table/metadata/m.avro");
         }
     }
 
@@ -774,13 +841,10 @@ mod tests {
             operator: None,
         };
 
-        let write_error = iceberg::io::Storage::write(
-            &storage,
-            "/outside/root",
-            Bytes::from_static(b"data"),
-        )
-        .await
-        .unwrap_err();
+        let write_error =
+            iceberg::io::Storage::write(&storage, "/outside/root", Bytes::from_static(b"data"))
+                .await
+                .unwrap_err();
         let output_error = iceberg::io::Storage::new_output(&storage, "/outside/root").unwrap_err();
 
         assert_eq!(write_error.kind(), ErrorKind::FeatureUnsupported);

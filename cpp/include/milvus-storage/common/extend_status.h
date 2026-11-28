@@ -58,6 +58,12 @@ enum class ExtendStatusCode : char {
   // Transaction-specific error codes
   TxnExhaustedRetry = LOON_TXN_EXHAUSTED_RETRY,
   TxnResolutionFailed = LOON_TXN_RESOLUTION_FAILED,
+
+  SourceAuthDenied = LOON_SOURCE_AUTH_DENIED,
+  SourceAuthExpired = LOON_SOURCE_AUTH_EXPIRED,
+  SourceAuthTransient = LOON_SOURCE_AUTH_TRANSIENT,
+  SourceAuthCancelled = LOON_SOURCE_AUTH_CANCELLED,
+  SourceAuthInvalidResponse = LOON_SOURCE_AUTH_INVALID_RESPONSE,
 };
 
 class ExtendStatusDetail : public arrow::StatusDetail {

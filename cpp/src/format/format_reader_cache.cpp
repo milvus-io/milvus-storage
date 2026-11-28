@@ -30,7 +30,8 @@
 
 namespace milvus_storage {
 
-MetadataCache::MetadataCache(bool enabled) : enabled_(enabled) {}
+MetadataCache::MetadataCache(bool enabled, SourceReadContextPtr source_context)
+    : source_context_(std::move(source_context)), enabled_(enabled) {}
 
 template <typename ReaderT>
 std::optional<typename FormatReaderMetadataCache<ReaderT>::MetadataPtr> FormatReaderMetadataCache<ReaderT>::get(

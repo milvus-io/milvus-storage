@@ -38,6 +38,7 @@
 #include "milvus-storage/common/macro.h"  // for UNLIKELY
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/source_format_reader.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/format/deltalake/deltalake_format_reader.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
@@ -65,8 +66,8 @@ class ColumnGroupLazyReaderImpl : public ColumnGroupLazyReader {
 
   private:
   arrow::Result<std::shared_ptr<arrow::Table>> take_files(std::span<const TakeTask> tasks);
-  arrow::Result<std::shared_ptr<ReaderT>> open_reader_for_file(size_t file_index);
-  folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> open_reader_for_file_async(
+  arrow::Result<std::shared_ptr<FormatReader>> open_reader_for_file(size_t file_index);
+  folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> open_reader_for_file_async(
       size_t file_index, folly::CancellationToken cancellation = {});
 
   std::shared_ptr<arrow::Schema> schema_;
@@ -78,13 +79,18 @@ class ColumnGroupLazyReaderImpl : public ColumnGroupLazyReader {
 };
 
 template <typename ReaderT>
-arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file(size_t file_index) {
+arrow::Result<std::shared_ptr<FormatReader>> ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file(
+    size_t file_index) {
   if (file_index >= column_group_->files.size()) {
     return arrow::Status::Invalid("Column group file index out of range: ", file_index,
                                   " >= ", column_group_->files.size());
   }
 
   auto file = column_group_->files[file_index];
+  if (cache_.source_context()) {
+    return OpenSourceFormatReader<ReaderT>(cache_, column_group_->format, file, properties_, schema_, needed_columns_,
+                                           key_retriever_, "");
+  }
   if (!cache_.enabled()) {
     ARROW_ASSIGN_OR_RAISE(auto reader, FormatReader::create(schema_, column_group_->format, file, properties_,
                                                             needed_columns_, key_retriever_));
@@ -106,22 +112,26 @@ arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupLazyReaderImpl<ReaderT>::open
 }
 
 template <typename ReaderT>
-folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>>
+folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>>
 ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file_async(size_t file_index,
                                                                folly::CancellationToken cancellation) {
   FOLLY_ARROW_RETURN_IF_CANCELLED(cancellation);
   if (file_index >= column_group_->files.size()) {
-    return folly::makeSemiFuture(arrow::Result<std::shared_ptr<ReaderT>>(arrow::Status::Invalid(
+    return folly::makeSemiFuture(arrow::Result<std::shared_ptr<FormatReader>>(arrow::Status::Invalid(
         "Column group file index out of range: ", file_index, " >= ", column_group_->files.size())));
   }
 
   auto file = column_group_->files[file_index];
+  if (cache_.source_context()) {
+    return OpenSourceFormatReaderAsync<ReaderT>(cache_, column_group_->format, file, properties_, schema_,
+                                                needed_columns_, key_retriever_, "", cancellation);
+  }
   if (!cache_.enabled()) {
     // No cache: create a fresh reader and let the format decide whether open is native async.
     return FormatReader::create_async(schema_, column_group_->format, file, properties_, needed_columns_,
                                       key_retriever_)
         .deferValue([format = column_group_->format](arrow::Result<std::shared_ptr<FormatReader>>&& reader_result)
-                        -> arrow::Result<std::shared_ptr<ReaderT>> {
+                        -> arrow::Result<std::shared_ptr<FormatReader>> {
           ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
           auto typed_reader = std::dynamic_pointer_cast<ReaderT>(reader);
           if (!typed_reader) {
@@ -144,11 +154,16 @@ ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file_async(size_t file_index
                             })
         .deferValue([file, read_schema = schema_, needed_columns = needed_columns_,
                      cancellation](arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>&& metadata_result)
-                        -> folly::SemiFuture<arrow::Result<std::shared_ptr<ReaderT>>> {
+                        -> folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> {
           FOLLY_ARROW_ASSIGN_OR_RAISE(auto metadata, std::move(metadata_result));
           FOLLY_ARROW_RETURN_IF_CANCELLED(cancellation);
           return ReaderT::MetaTrait::create_from_metadata_async(std::move(metadata), file, read_schema, needed_columns,
-                                                                "");
+                                                                "")
+              .deferValue(
+                  [](arrow::Result<std::shared_ptr<ReaderT>> result) -> arrow::Result<std::shared_ptr<FormatReader>> {
+                    ARROW_ASSIGN_OR_RAISE(auto reader, std::move(result));
+                    return reader;
+                  });
         });
   }
 
@@ -230,7 +245,7 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> ColumnGroupLazyR
   // reader is shared with another in-flight take.
   return open_reader_for_file_async(task.file_index, task.cancellation)
       .deferValue([rows_in_file = std::move(task.file_offsets),
-                   cancellation = task.cancellation](arrow::Result<std::shared_ptr<ReaderT>>&& reader_result)
+                   cancellation = task.cancellation](arrow::Result<std::shared_ptr<FormatReader>>&& reader_result)
                       -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> {
         FOLLY_ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
         FOLLY_ARROW_RETURN_IF_CANCELLED(cancellation);
@@ -310,7 +325,7 @@ arrow::Result<std::unique_ptr<ColumnGroupLazyReader>> ColumnGroupLazyReader::cre
   };
 
   if (!cache_enabled) {
-    return create_reader(milvus_storage::MetadataCache(false));
+    return create_reader(milvus_storage::MetadataCache(false, cache.source_context()));
   }
 
   return create_reader(cache);

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/format/lance/lance_table_reader.h"
+#include "milvus-storage/filesystem/azure/source_sas_token_policy.h"
 
 #include <algorithm>
 #include <atomic>
@@ -540,6 +541,21 @@ load_fragment_metadata_async(uint64_t fragment_id,
                   }
                 }
               }
+              // Size estimates are optional, but a source authorization failure
+              // is not an unavailable optimization. Preserve its category even
+              // when the error has round-tripped through the Rust bridge.
+              if (auto detail = ExtendStatusDetail::UnwrapStatus(result.status())) {
+                switch (detail->code()) {
+                  case ExtendStatusCode::SourceAuthDenied:
+                  case ExtendStatusCode::SourceAuthExpired:
+                  case ExtendStatusCode::SourceAuthTransient:
+                  case ExtendStatusCode::SourceAuthCancelled:
+                  case ExtendStatusCode::SourceAuthInvalidResponse:
+                    return result.status();
+                  default:
+                    break;
+                }
+              }
               const bool memory_size_available = result.ok();
               std::vector<uint64_t> sizes;
               if (memory_size_available) {
@@ -680,6 +696,79 @@ LanceTableReader::MetaTrait::load_metadata_async(const api::ColumnGroupFile& fil
       });
 }
 
+arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTrait::load_metadata_with_context(
+    const api::ColumnGroupFile& file,
+    const std::shared_ptr<const api::Properties>& properties,
+    const KeyRetriever& key_retriever,
+    SourceReadContextPtr context) {
+  return load_metadata_with_context_async(file, properties, key_retriever, std::move(context)).get();
+}
+
+folly::SemiFuture<arrow::Result<LanceTableReader::MetaTrait::MetadataPtr>>
+LanceTableReader::MetaTrait::load_metadata_with_context_async(const api::ColumnGroupFile& file,
+                                                              const std::shared_ptr<const api::Properties>& properties,
+                                                              const KeyRetriever& /*key_retriever*/,
+                                                              SourceReadContextPtr context) {
+  return folly::makeSemiFuture().deferValue([file, properties,
+                                             context](folly::Unit) -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+    FOLLY_ARROW_RETURN_NOT_OK(
+        fs::SourceCredentialArrowStatus(context ? context->CheckState() : LOON_SOURCE_CREDENTIAL_DENIED));
+    FOLLY_ARROW_ASSIGN_OR_RAISE(auto parsed, ParseSourceLanceUri(file.path));
+    FOLLY_ARROW_ASSIGN_OR_RAISE(auto location, ResolveSourceLanceLocation(parsed.first, properties, context));
+    uint64_t version = 0;
+    if (const auto it = file.properties.find(kDatasetVersionProperty); it != file.properties.end()) {
+      const auto [valid, value] = api::convert::convertFunc<uint64_t>(it->second);
+      if (!valid)
+        return folly::makeSemiFuture(
+            arrow::Result<MetadataPtr>(arrow::Status::Invalid("Invalid Lance dataset version")));
+      version = value;
+    }
+    auto resolved = version == 0
+                        ? submit_lance_async<uint64_t>(
+                              "Failed to resolve source Lance dataset version",
+                              [](uint64_t value, ArrowArrayStream&) -> arrow::Result<uint64_t> { return value; },
+                              [&](LanceAsyncCallback callback, void* data) {
+                                return BlockingDataset::ResolveLatestVersionAsync(
+                                    location.lance_uri, location.source.filesystem, location.options, callback, data);
+                              })
+                        : folly::makeSemiFuture(arrow::Result<uint64_t>(version));
+    return std::move(resolved)
+        .deferValue([location, context](arrow::Result<uint64_t> result)
+                        -> folly::SemiFuture<arrow::Result<std::shared_ptr<BlockingDataset>>> {
+          FOLLY_ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
+          FOLLY_ARROW_ASSIGN_OR_RAISE(auto version, std::move(result));
+          return get_or_open_dataset_async(location.source.source_uri, location.source.filesystem, location.options,
+                                           location.source.cache_identity, version, location.lance_uri);
+        })
+        .deferValue([file, properties, context, location,
+                     parsed](arrow::Result<std::shared_ptr<BlockingDataset>> result)
+                        -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+          FOLLY_ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
+          FOLLY_ARROW_ASSIGN_OR_RAISE(auto dataset, std::move(result));
+          auto cache = std::make_shared<FragmentMetadataCache>();
+          return cache
+              ->get_or_load_async(parsed.second,
+                                  [id = parsed.second, properties, dataset] {
+                                    return load_fragment_metadata_async(id, properties, dataset);
+                                  })
+              .deferValue(
+                  [file, properties, context, location, parsed, dataset,
+                   cache](arrow::Result<std::shared_ptr<const FragmentMetadata>> result) -> arrow::Result<MetadataPtr> {
+                    ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
+                    ARROW_ASSIGN_OR_RAISE(auto fragment, std::move(result));
+                    auto metadata = std::make_shared<Metadata>();
+                    metadata->cache_key = cache_key(file);
+                    metadata->path = parsed.first;
+                    metadata->file_schema = fragment->file_schema;
+                    metadata->cache_size = sizeof(Metadata);
+                    metadata->payload =
+                        Payload{parsed.first, location.source.filesystem, dataset, cache, properties, context};
+                    return MetadataPtr(std::move(metadata));
+                  });
+        });
+  });
+}
+
 arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::create_from_metadata(
     MetadataPtr metadata,
     const milvus_storage::api::ColumnGroupFile& file,
@@ -694,7 +783,8 @@ arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::cr
     return arrow::Status::Invalid("Cannot open Lance reader from incomplete metadata");
   }
 
-  ARROW_ASSIGN_OR_RAISE(auto parsed_uri, ParseLanceUri(file.path));
+  ARROW_ASSIGN_OR_RAISE(auto parsed_uri,
+                        (metadata->payload.source_context ? ParseSourceLanceUri(file.path) : ParseLanceUri(file.path)));
   const auto& base_uri = parsed_uri.first;
   const auto fragment_id = parsed_uri.second;
   if (base_uri != metadata->payload.base_uri) {
@@ -754,7 +844,8 @@ LanceTableReader::MetaTrait::create_from_metadata_async(MetadataPtr metadata,
       return folly::makeSemiFuture(arrow::Result<std::shared_ptr<LanceTableReader>>(
           arrow::Status::Invalid("Cannot open Lance reader from incomplete metadata")));
     }
-    FOLLY_ARROW_ASSIGN_OR_RAISE(auto parsed_uri, ParseLanceUri(file.path));
+    FOLLY_ARROW_ASSIGN_OR_RAISE(auto parsed_uri, (metadata->payload.source_context ? ParseSourceLanceUri(file.path)
+                                                                                   : ParseLanceUri(file.path)));
     if (parsed_uri.first != metadata->payload.base_uri) {
       return folly::makeSemiFuture(arrow::Result<std::shared_ptr<LanceTableReader>>(arrow::Status::Invalid(
           "Lance metadata base URI does not match file URI: ", metadata->payload.base_uri, " != ", parsed_uri.first)));

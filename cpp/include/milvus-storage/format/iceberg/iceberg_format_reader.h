@@ -48,12 +48,24 @@ class IcebergFormatReader final : public FormatReader {
     static arrow::Result<MetadataPtr> load_metadata(const api::ColumnGroupFile& file,
                                                     const std::shared_ptr<const api::Properties>& properties,
                                                     const milvus_storage::KeyRetriever& key_retriever);
+    static arrow::Result<MetadataPtr> load_metadata_with_context(
+        const api::ColumnGroupFile& file,
+        const std::shared_ptr<const api::Properties>& properties,
+        const milvus_storage::KeyRetriever& key_retriever,
+        SourceReadContextPtr context);
+
     static arrow::Result<std::shared_ptr<IcebergFormatReader>> create_from_metadata(
         MetadataPtr metadata,
         const api::ColumnGroupFile& file,
         const std::shared_ptr<arrow::Schema>& read_schema,
         const std::vector<std::string>& needed_columns,
         const std::string& predicate);
+
+ private:
+    static arrow::Result<MetadataPtr> load_metadata_impl(const api::ColumnGroupFile& file,
+                                                         const std::shared_ptr<const api::Properties>& properties,
+                                                         const milvus_storage::KeyRetriever& key_retriever,
+                                                         SourceReadContextPtr context);
   };
 
   IcebergFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,

@@ -41,6 +41,11 @@ FFI_EXPORT extern const int loon_errcode_fault_inject;
 FFI_EXPORT extern const int loon_errcode_not_support;
 FFI_EXPORT extern const int loon_errcode_file_not_found;
 FFI_EXPORT extern const int loon_errcode_permission_denied;
+FFI_EXPORT extern const int loon_errcode_source_auth_denied;
+FFI_EXPORT extern const int loon_errcode_source_auth_expired;
+FFI_EXPORT extern const int loon_errcode_source_auth_transient;
+FFI_EXPORT extern const int loon_errcode_source_auth_cancelled;
+FFI_EXPORT extern const int loon_errcode_source_auth_invalid_response;
 
 FFI_EXPORT extern const int loon_errcode_aws_no_such_upload;
 FFI_EXPORT extern const int loon_errcode_aws_conflict;

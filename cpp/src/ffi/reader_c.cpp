@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include "milvus-storage/ffi_c.h"
+#include "milvus-storage/ffi_source_read_context_c.h"
+#include "milvus-storage/source_read_context.h"
 #include "milvus-storage/common/encryption_util.h"
 
 #include <cstring>
@@ -413,6 +415,52 @@ LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
   }
 
   RETURN_UNREACHABLE();
+}
+
+LoonFFIResult loon_reader_new_with_context(const LoonColumnGroups* column_groups,
+                                           ArrowSchema* schema,
+                                           const char* const* needed_columns,
+                                           size_t num_columns,
+                                           const LoonProperties* properties,
+                                           LoonSourceReadContextHandle context,
+                                           LoonReaderHandle* out_handle) {
+  if (out_handle)
+    *out_handle = 0;
+  if (!column_groups || !schema || !properties || !out_handle || (num_columns && !needed_columns))
+    RETURN_ERROR(LOON_INVALID_ARGS, "Missing source reader arguments");
+  if (properties->count && !properties->properties)
+    RETURN_ERROR(LOON_INVALID_PROPERTIES, "Invalid source reader properties");
+  for (size_t i = 0; i < properties->count; ++i) {
+    if (!properties->properties[i].key || !properties->properties[i].value)
+      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Invalid source reader properties");
+  }
+  for (size_t i = 0; i < num_columns; ++i) {
+    if (!needed_columns[i])
+      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid source reader projection");
+  }
+  try {
+    auto source_context = GetSourceReadContext(context);
+    if (!source_context)
+      RETURN_ERROR(LOON_SOURCE_AUTH_DENIED);
+    std::shared_ptr<const Properties> converted;
+    if (ConvertFFIProperties(converted, properties))
+      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Invalid source reader properties");
+    auto imported_schema = arrow::ImportSchema(schema);
+    RETURN_ARROW_ERROR_IF(imported_schema.status(), LOON_ARROW_ERROR, "Source schema import failed");
+    auto groups = std::make_shared<ColumnGroups>();
+    auto status = column_groups_import(column_groups, groups.get());
+    RETURN_ARROW_ERROR_IF(status, LOON_LOGICAL_ERROR, "Source column group import failed");
+    auto result =
+        Reader::create_with_context(groups, *imported_schema, convert_needed_columns(needed_columns, num_columns),
+                                    converted, std::move(source_context));
+    RETURN_ARROW_ERROR_IF(result.status(), LOON_ARROW_ERROR, "Source reader construction failed");
+    *out_handle = reinterpret_cast<LoonReaderHandle>(result->release());
+    RETURN_SUCCESS();
+  } catch (const std::bad_alloc&) {
+    RETURN_ERROR(LOON_MEMORY_ERROR, "Source reader allocation failed");
+  } catch (...) {
+    RETURN_ERROR(LOON_GOT_EXCEPTION, "Source reader construction failed");
+  }
 }
 
 void loon_reader_set_keyretriever(LoonReaderHandle reader, const char* (*key_retriever)(const char* metadata)) {

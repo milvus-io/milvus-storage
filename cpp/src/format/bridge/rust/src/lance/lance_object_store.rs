@@ -108,20 +108,35 @@ impl FFIReadOptions {
             .ok_or_else(|| {
                 LanceError::invalid_input(format!("missing required option: {FS_CACHE_KEY}"))
             })?;
-        fs_cache_key
-            .strip_prefix("fs:")
-            .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
-            .ok_or_else(|| {
-                LanceError::invalid_input(format!(
-                    "{FS_CACHE_KEY} must have the form fs:<unsigned integer>"
-                ))
-            })?
-            .parse::<u64>()
-            .map_err(|_| {
-                LanceError::invalid_input(format!(
-                    "{FS_CACHE_KEY} must have the form fs:<unsigned integer>"
-                ))
-            })?;
+        // Source filesystems are isolated by the native context identity and
+        // verified Azure binding. Keep a separate namespace from configuration
+        // hashes: sharing a scheduler also shares its credential-bearing store.
+        let unsigned_id = |value: &str| {
+            !value.is_empty()
+                && value.bytes().all(|byte| byte.is_ascii_digit())
+                && value.parse::<u64>().is_ok()
+        };
+        let parts: Vec<_> = fs_cache_key.split(':').collect();
+        let valid_identity = match parts.as_slice() {
+            ["fs", id] => unsigned_id(id),
+            ["source", id, account, endpoint, container] => {
+                unsigned_id(id)
+                    && [account, endpoint, container].iter().all(|part| {
+                        !part.is_empty()
+                            && part.bytes().all(|byte| {
+                                byte.is_ascii_lowercase()
+                                    || byte.is_ascii_digit()
+                                    || matches!(byte, b'-' | b'.')
+                            })
+                    })
+            }
+            _ => false,
+        };
+        if !valid_identity {
+            return Err(LanceError::invalid_input(format!(
+                "{FS_CACHE_KEY} must be a native filesystem cache identity"
+            )));
+        }
 
         let is_local_value = options.remove(FS_IS_LOCAL_KEY).ok_or_else(|| {
             LanceError::invalid_input(format!("missing required option: {FS_IS_LOCAL_KEY}"))
@@ -274,11 +289,33 @@ pub(crate) struct FFIObjectStoreProvider {
 }
 
 impl FFIObjectStoreProvider {
+    fn validate_source_uri(filesystem: &SharedPtr<FileSystemWrapper>, url: &Url) -> Result<()> {
+        // A URI inside a Lance manifest is not authority. Check the complete
+        // reference against the retained source binding before the generic
+        // mapper discards userinfo, query, fragment, or the container name.
+        // Ordinary filesystems return is_source=false and preserve legacy behavior.
+        if let Some(filesystem) = filesystem.as_ref() {
+            let resolved = crate::iceberg_ffi::resolve_source_uri(filesystem, url.as_str());
+            if resolved.error_code != 0 {
+                return Err(LanceError::IO {
+                    source: Box::new(crate::filesystem_c::LoonFFIError::from_code(
+                        resolved.error_code,
+                        "source URI binding",
+                        "native validation failed",
+                    )),
+                    location: snafu::location!(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn new(
         filesystem: SharedPtr<FileSystemWrapper>,
         dataset_url: &Url,
         options: &FFIReadOptions,
     ) -> Result<Self> {
+        Self::validate_source_uri(&filesystem, dataset_url)?;
         Ok(Self {
             filesystem,
             mapper: options.path_mapper(dataset_url)?,
@@ -336,9 +373,7 @@ impl std::fmt::Debug for FFIObjectStoreProvider {
 #[async_trait::async_trait]
 impl ObjectStoreProvider for FFIObjectStoreProvider {
     async fn new_store(&self, base_path: Url, _params: &ObjectStoreParams) -> Result<ObjectStore> {
-        self.mapper
-            .from_url(&base_path)
-            .map_err(|error| LanceError::invalid_input(error.to_string()))?;
+        self.extract_path(&base_path)?;
 
         // Build the read-only adapter first, then apply AIMD exactly once below.
         // The scheduler may retain that wrapped store, making its limiter shared.
@@ -365,6 +400,7 @@ impl ObjectStoreProvider for FFIObjectStoreProvider {
     }
 
     fn extract_path(&self, url: &Url) -> Result<object_store::path::Path> {
+        Self::validate_source_uri(&self.filesystem, url)?;
         self.mapper
             .from_url(url)
             .map_err(|error| LanceError::invalid_input(error.to_string()))
@@ -505,6 +541,35 @@ mod tests {
         let mut excessive_parallelism = valid_filesystem_read_options(false);
         excessive_parallelism.insert(LANCE_IO_PARALLELISM_KEY.into(), "257".into());
         assert!(FFIReadOptions::parse(excessive_parallelism).is_err());
+    }
+
+    #[test]
+    fn source_read_identity_is_preserved_and_separate_from_legacy() {
+        for key in [
+            "source:1:acct:core.windows.net:tables",
+            "source:2:acct:core.windows.net:tables",
+            "source:1:acct:core.windows.net:other",
+            "fs:1",
+        ] {
+            let mut options = valid_filesystem_read_options(false);
+            options.insert(FS_CACHE_KEY.into(), key.into());
+            let parsed = FFIReadOptions::parse(options).unwrap();
+            assert_eq!(parsed.object_store_prefix(), key);
+        }
+        for key in [
+            "source:1",
+            "source:1:acct:core.windows.net:",
+            "source:-1:acct:core.windows.net:tables",
+            "source:18446744073709551616:acct:core.windows.net:tables",
+            "source:1:acct:core.windows.net:tables:extra",
+            "source:1:acct:core.windows.net:tables?sig=secret",
+            "fs:+1",
+        ] {
+            let mut options = valid_filesystem_read_options(false);
+            options.insert(FS_CACHE_KEY.into(), key.into());
+            let error = FFIReadOptions::parse(options).unwrap_err();
+            assert!(!error.to_string().contains("secret"));
+        }
     }
 
     #[test]

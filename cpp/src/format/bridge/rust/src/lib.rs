@@ -715,7 +715,15 @@ pub mod vortex_ffi {
 
 #[cxx::bridge(namespace = "milvus_storage::iceberg::ffi")]
 pub mod iceberg_ffi {
+    struct SourceUriResult {
+        is_source: bool,
+        error_code: i32,
+        path: String,
+    }
+
     unsafe extern "C++" {
+        include!("iceberg/source_uri_bridge.h");
+        fn resolve_source_uri(filesystem: &IcebergFileSystemWrapper, uri: &str) -> SourceUriResult;
         #[namespace = ""]
         #[cxx_name = "FileSystemWrapper"]
         type IcebergFileSystemWrapper = crate::lance_ffi::FileSystemWrapper;

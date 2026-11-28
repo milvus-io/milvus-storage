@@ -3,6 +3,21 @@
 
 {
   global:
+    # Runtime source authorization and context-aware readers.
+    loon_source_read_context_create;
+    loon_source_read_context_retain;
+    loon_source_read_context_cancel;
+    loon_source_read_context_release;
+    loon_reader_new_with_context;
+    loon_filesystem_get_with_context;
+    loon_exttable_explore_with_context;
+    loon_exttable_get_file_info_with_context;
+    loon_errcode_source_auth_denied;
+    loon_errcode_source_auth_expired;
+    loon_errcode_source_auth_transient;
+    loon_errcode_source_auth_cancelled;
+    loon_errcode_source_auth_invalid_response;
+
     # Result interface
     loon_ffi_is_success;
     loon_ffi_get_errmsg;

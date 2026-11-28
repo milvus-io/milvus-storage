@@ -59,6 +59,21 @@ arrow::Result<Format*> Format::get(const std::string& format) {
   return arrow::Status::Invalid(fmt::format("Unknown file format: {}", format));
 }
 
+arrow::Result<std::vector<api::ColumnGroupFile>> Format::explore_with_context(
+    const std::string&, const std::shared_ptr<const api::Properties>&, SourceReadContextPtr) {
+  return arrow::Status::NotImplemented("Format does not support source-read contexts");
+}
+
+arrow::Result<std::shared_ptr<FormatReader>> Format::create_reader_with_context(
+    const std::shared_ptr<arrow::Schema>&,
+    const api::ColumnGroupFile&,
+    const std::shared_ptr<const api::Properties>&,
+    const std::vector<std::string>&,
+    const std::function<std::string(const std::string&)>&,
+    SourceReadContextPtr) {
+  return arrow::Status::NotImplemented("Format does not support source-read contexts");
+}
+
 arrow::Result<std::vector<api::ColumnGroupFile>> PlainFormat::explore(
     const std::string& explore_dir, const std::shared_ptr<const api::Properties>& properties) {
   // Resolve URI — keep full parsed URI for constructing file URIs later
