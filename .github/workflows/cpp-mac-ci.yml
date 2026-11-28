@@ -4,11 +4,17 @@ on:
   push:
     paths:
       - 'cpp/conanfile.py'
+      - 'cpp/CMakeLists.txt'
+      - 'cpp/cmake/**'
+      - 'cpp/src/**'
       - '.github/workflows/cpp-ci.yml'
       - '.github/workflows/cpp-mac-ci.yml'
   pull_request:
     paths:
       - 'cpp/conanfile.py'
+      - 'cpp/CMakeLists.txt'
+      - 'cpp/cmake/**'
+      - 'cpp/src/**'
       - '.github/workflows/cpp-ci.yml'
       - '.github/workflows/cpp-mac-ci.yml'
 
@@ -19,7 +25,9 @@ concurrency:
 jobs:
   mac-build:
     runs-on: macos-26
-    timeout-minutes: 180
+    # Building the full dependency graph now includes compiling the
+    # FetchContent-ed milvus-common, which pushes the mac run past 3 hours.
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 
