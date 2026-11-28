@@ -1,0 +1,278 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -33,6 +33,7 @@
+ [features]
+ default = []
+ jwt = [
++    "dep:pem",
+     "dep:rsa",
+     "dep:serde",
+     "dep:serde_json",
+@@ -44,6 +45,11 @@
+ 
+ [dependencies.anyhow]
+ version = "1"
++
++[dependencies.aws-lc-rs]
++version = "=1.18.2"
++features = ["fips", "alloc"]
++default-features = false
+ 
+ [dependencies.base64]
+ version = "0.22"
+@@ -60,9 +66,6 @@
+ [dependencies.hex]
+ version = "0.4"
+ 
+-[dependencies.hmac]
+-version = "0.13"
+-
+ [dependencies.http]
+ version = "1"
+ 
+@@ -74,6 +77,10 @@
+ 
+ [dependencies.percent-encoding]
+ version = "2"
++
++[dependencies.pem]
++version = "3"
++optional = true
+ 
+ [dependencies.rsa]
+ version = "0.9.2"
+@@ -92,13 +99,6 @@
+ version = "1"
+ optional = true
+ 
+-[dependencies.sha1]
+-version = "0.11"
+-
+-[dependencies.sha2]
+-version = "0.11"
+-features = ["oid"]
+-
+ [target.'cfg(target_os = "windows")'.dependencies.windows-sys]
+ version = "0.61.0"
+ features = [
+--- a/src/hash.rs
++++ b/src/hash.rs
+@@ -18,14 +18,9 @@
+ //! Hash related utils.
+ 
+ use crate::Error;
++use aws_lc_rs::{digest, hmac};
+ use base64::Engine;
+ use base64::prelude::BASE64_STANDARD;
+-use hmac::Hmac;
+-use hmac::KeyInit;
+-use hmac::Mac;
+-use sha1::Sha1;
+-use sha2::Digest;
+-use sha2::Sha256;
+ 
+ /// Base64 encode
+ pub fn base64_encode(content: &[u8]) -> String {
+@@ -44,7 +39,7 @@
+ /// Use this function instead of `hex::encode(sha1(content))` can reduce
+ /// extra copy.
+ pub fn hex_sha1(content: &[u8]) -> String {
+-    hex::encode(Sha1::digest(content))
++    hex::encode(digest::digest(&digest::SHA1_FOR_LEGACY_USE_ONLY, content))
+ }
+ 
+ /// Hex encoded SHA256 hash.
+@@ -52,25 +47,19 @@
+ /// Use this function instead of `hex::encode(sha256(content))` can reduce
+ /// extra copy.
+ pub fn hex_sha256(content: &[u8]) -> String {
+-    hex::encode(Sha256::digest(content))
++    hex::encode(digest::digest(&digest::SHA256, content))
+ }
+ 
+ /// HMAC with SHA256 hash.
+ pub fn hmac_sha256(key: &[u8], content: &[u8]) -> Vec<u8> {
+-    // SAFETY: HMAC's new_from_slice always returns Ok - it handles any key length
+-    let mut h = Hmac::<Sha256>::new_from_slice(key).unwrap();
+-    h.update(content);
+-
+-    h.finalize().into_bytes().to_vec()
++    let signature = sign_hmac(hmac::HMAC_SHA256, key, content);
++    signature.as_ref().to_vec()
+ }
+ 
+ /// Base64 encoded HMAC with SHA256 hash.
+ pub fn base64_hmac_sha256(key: &[u8], content: &[u8]) -> String {
+-    // SAFETY: HMAC's new_from_slice always returns Ok - it handles any key length
+-    let mut h = Hmac::<Sha256>::new_from_slice(key).unwrap();
+-    h.update(content);
+-
+-    base64_encode(&h.finalize().into_bytes())
++    let signature = sign_hmac(hmac::HMAC_SHA256, key, content);
++    base64_encode(signature.as_ref())
+ }
+ 
+ /// Hex encoded HMAC with SHA1 hash.
+@@ -78,11 +67,8 @@
+ /// Use this function instead of `hex::encode(hmac_sha1(key, content))` can
+ /// reduce extra copy.
+ pub fn hex_hmac_sha1(key: &[u8], content: &[u8]) -> String {
+-    // SAFETY: HMAC's new_from_slice always returns Ok - it handles any key length
+-    let mut h = Hmac::<Sha1>::new_from_slice(key).unwrap();
+-    h.update(content);
+-
+-    hex::encode(h.finalize().into_bytes())
++    let signature = sign_hmac(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, key, content);
++    hex::encode(signature)
+ }
+ 
+ /// Hex encoded HMAC with SHA256 hash.
+@@ -90,18 +76,16 @@
+ /// Use this function instead of `hex::encode(hmac_sha256(key, content))` can
+ /// reduce extra copy.
+ pub fn hex_hmac_sha256(key: &[u8], content: &[u8]) -> String {
+-    // SAFETY: HMAC's new_from_slice always returns Ok - it handles any key length
+-    let mut h = Hmac::<Sha256>::new_from_slice(key).unwrap();
+-    h.update(content);
+-
+-    hex::encode(h.finalize().into_bytes())
++    let signature = sign_hmac(hmac::HMAC_SHA256, key, content);
++    hex::encode(signature)
+ }
+ 
+ /// Base64 encoded HMAC with SHA1 hash.
+ pub fn base64_hmac_sha1(key: &[u8], content: &[u8]) -> String {
+-    // SAFETY: HMAC's new_from_slice always returns Ok - it handles any key length
+-    let mut h = Hmac::<Sha1>::new_from_slice(key).unwrap();
+-    h.update(content);
++    let signature = sign_hmac(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, key, content);
++    base64_encode(signature.as_ref())
++}
+ 
+-    base64_encode(&h.finalize().into_bytes())
++fn sign_hmac(algorithm: hmac::Algorithm, key: &[u8], content: &[u8]) -> hmac::Tag {
++    hmac::sign(&hmac::Key::new(algorithm, key), content)
+ }
+--- a/src/jwt.rs
++++ b/src/jwt.rs
+@@ -17,20 +17,16 @@
+ 
+ //! JWT encoding helpers.
+ 
++use aws_lc_rs::{rand::SystemRandom, signature};
+ use base64::Engine;
+ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+ use rsa::RsaPrivateKey;
+-use rsa::pkcs1v15::SigningKey;
+-use rsa::pkcs8::DecodePrivateKey;
+-use rsa::rand_core::OsRng;
+-use rsa::sha2::Sha256;
+-use rsa::signature::{RandomizedSigner, SignatureEncoding};
++use rsa::pkcs8::EncodePrivateKey;
+ use serde::Serialize;
+ 
+ use crate::{Error, Result};
+ 
+ /// Encode a JWS compact JWT using the RS256 algorithm.
+-///
+ /// RS256 is RSA PKCS#1 v1.5 with SHA-256. The caller owns the JWT header and
+ /// claims shape so service-specific fields such as `x5t` stay service-local.
+ pub fn encode_rs256<H, C>(header: &H, claims: &C, private_key: &RsaPrivateKey) -> Result<String>
+@@ -38,16 +34,11 @@
+     H: Serialize,
+     C: Serialize,
+ {
+-    let encoded_header = encode_json(header)?;
+-    let encoded_claims = encode_json(claims)?;
+-    let signing_input = format!("{encoded_header}.{encoded_claims}");
+-
+-    let mut rng = OsRng;
+-    let signing_key = SigningKey::<Sha256>::new(private_key.clone());
+-    let signature = signing_key.sign_with_rng(&mut rng, signing_input.as_bytes());
+-    let encoded_signature = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+-
+-    Ok(format!("{signing_input}.{encoded_signature}"))
++    let key_der = private_key.to_pkcs8_der().map_err(|e| {
++        Error::credential_invalid("failed to encode PKCS#8 RSA private key").with_source(e)
++    })?;
++    let key_pair = parse_pkcs8_rsa_key(key_der.as_bytes())?;
++    encode_rs256_with_key_pair(header, claims, &key_pair)
+ }
+ 
+ /// Encode a JWS compact JWT using an RSA private key in PKCS#8 PEM format.
+@@ -56,14 +47,62 @@
+     H: Serialize,
+     C: Serialize,
+ {
+-    let private_key_pem = std::str::from_utf8(private_key_pem).map_err(|e| {
+-        Error::credential_invalid("RSA private key PEM is not valid UTF-8").with_source(e)
+-    })?;
+-    let private_key = RsaPrivateKey::from_pkcs8_pem(private_key_pem).map_err(|e| {
++    let key_pair = parse_pkcs8_rsa_key_pem(private_key_pem)?;
++    encode_rs256_with_key_pair(header, claims, &key_pair)
++}
++
++/// Sign data using RSA PKCS#1 v1.5 with SHA-256 and a PKCS#8 PEM private key.
++pub fn sign_rs256_pem(private_key_pem: &[u8], message: &[u8]) -> Result<Vec<u8>> {
++    sign_rs256(&parse_pkcs8_rsa_key_pem(private_key_pem)?, message)
++}
++
++fn parse_pkcs8_rsa_key_pem(private_key_pem: &[u8]) -> Result<signature::RsaKeyPair> {
++    let pem = pem::parse(private_key_pem).map_err(|e| {
+         Error::credential_invalid("failed to parse PKCS#8 RSA private key PEM").with_source(e)
+     })?;
++    if pem.tag() != "PRIVATE KEY" {
++        return Err(Error::credential_invalid(
++            "expected PKCS#8 RSA private key PEM",
++        ));
++    }
++    parse_pkcs8_rsa_key(pem.contents())
++}
+ 
+-    encode_rs256(header, claims, &private_key)
++fn parse_pkcs8_rsa_key(private_key_der: &[u8]) -> Result<signature::RsaKeyPair> {
++    signature::RsaKeyPair::from_pkcs8(private_key_der).map_err(|e| {
++        Error::credential_invalid("failed to parse PKCS#8 RSA private key DER").with_source(e)
++    })
++}
++
++fn sign_rs256(key_pair: &signature::RsaKeyPair, message: &[u8]) -> Result<Vec<u8>> {
++    let mut out = vec![0; key_pair.public_modulus_len()];
++    key_pair
++        .sign(
++            &signature::RSA_PKCS1_SHA256,
++            &SystemRandom::new(),
++            message,
++            &mut out,
++        )
++        .map_err(|e| Error::unexpected("failed to sign using RS256").with_source(e))?;
++    Ok(out)
++}
++
++fn encode_rs256_with_key_pair<H, C>(
++    header: &H,
++    claims: &C,
++    key_pair: &signature::RsaKeyPair,
++) -> Result<String>
++where
++    H: Serialize,
++    C: Serialize,
++{
++    let encoded_header = encode_json(header)?;
++    let encoded_claims = encode_json(claims)?;
++    let signing_input = format!("{encoded_header}.{encoded_claims}");
++    let signature = sign_rs256(key_pair, signing_input.as_bytes())?;
++    let encoded_signature = URL_SAFE_NO_PAD.encode(signature);
++
++    Ok(format!("{signing_input}.{encoded_signature}"))
+ }
+ 
+ fn encode_json<T>(value: &T) -> Result<String>
+@@ -81,6 +120,7 @@
+     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+     use rsa::pkcs1v15::{Signature, VerifyingKey};
+     use rsa::rand_core::OsRng;
++    use rsa::sha2::Sha256;
+     use rsa::signature::Verifier;
+     use serde_json::json;
+ 

@@ -1,0 +1,140 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -59,13 +59,14 @@
+     "chrono/serde",
+     "base64",
+     "rand",
+-    "ring",
++    "dep:aws-lc-rs",
+     "http-body-util",
+     "form_urlencoded",
+     "serde_urlencoded",
+     "tokio",
+ ]
+ default = ["fs"]
++fips = ["aws-lc-rs?/fips"]
+ fs = [
+     "walkdir",
+     "tokio",
+@@ -79,7 +80,7 @@
+     "rand",
+     "tokio",
+ ]
+-tls-webpki-roots = ["reqwest?/rustls-tls-webpki-roots"]
++tls-webpki-roots = ["reqwest?/rustls-tls-webpki-roots-no-provider"]
+ tokio = [
+     "dep:tokio",
+     "dep:tracing",
+@@ -173,15 +174,15 @@
+ [dependencies.reqwest]
+ version = "0.12"
+ features = [
+-    "rustls-tls-native-roots",
++    "rustls-tls-native-roots-no-provider",
+     "http2",
+ ]
+ optional = true
+ default-features = false
+ 
+-[dependencies.ring]
+-version = "0.17"
+-features = ["std"]
++[dependencies.aws-lc-rs]
++version = "=1.18.2"
++features = ["alloc"]
+ optional = true
+ default-features = false
+ 
+--- a/src/aws/client.rs
++++ b/src/aws/client.rs
+@@ -52,8 +52,8 @@
+ use md5::{Digest, Md5};
+ use percent_encoding::{PercentEncode, utf8_percent_encode};
+ use quick_xml::events::{self as xml_events};
+-use ring::digest;
+-use ring::digest::Context;
++use aws_lc_rs::digest;
++use aws_lc_rs::digest::Context;
+ use serde::{Deserialize, Serialize};
+ use std::sync::Arc;
+ 
+--- a/src/gcp/credential.rs
++++ b/src/gcp/credential.rs
+@@ -31,7 +31,7 @@
+ use http::{HeaderMap, Method};
+ use itertools::Itertools;
+ use percent_encoding::utf8_percent_encode;
+-use ring::signature::RsaKeyPair;
++use aws_lc_rs::signature::RsaKeyPair;
+ use serde::Deserialize;
+ use std::collections::BTreeMap;
+ use std::env;
+@@ -70,11 +70,11 @@
+     #[error("Invalid RSA key: {}", source)]
+     InvalidKey {
+         #[from]
+-        source: ring::error::KeyRejected,
++        source: aws_lc_rs::error::KeyRejected,
+     },
+ 
+     #[error("Error signing: {}", source)]
+-    Sign { source: ring::error::Unspecified },
++    Sign { source: aws_lc_rs::error::Unspecified },
+ 
+     #[error("Error encoding jwt payload: {}", source)]
+     Encode { source: serde_json::Error },
+@@ -151,11 +151,11 @@
+     }
+ 
+     fn sign(&self, string_to_sign: &str) -> Result<String> {
+-        let mut signature = vec![0; self.0.public().modulus_len()];
++        let mut signature = vec![0; self.0.public_modulus_len()];
+         self.0
+             .sign(
+-                &ring::signature::RSA_PKCS1_SHA256,
+-                &ring::rand::SystemRandom::new(),
++                &aws_lc_rs::signature::RSA_PKCS1_SHA256,
++                &aws_lc_rs::rand::SystemRandom::new(),
+                 string_to_sign.as_bytes(),
+                 &mut signature,
+             )
+@@ -287,12 +287,12 @@
+ 
+         let claim_str = b64_encode_obj(&claims)?;
+         let message = [jwt_header.as_ref(), claim_str.as_ref()].join(".");
+-        let mut sig_bytes = vec![0; self.private_key.0.public().modulus_len()];
++        let mut sig_bytes = vec![0; self.private_key.0.public_modulus_len()];
+         self.private_key
+             .0
+             .sign(
+-                &ring::signature::RSA_PKCS1_SHA256,
+-                &ring::rand::SystemRandom::new(),
++                &aws_lc_rs::signature::RSA_PKCS1_SHA256,
++                &aws_lc_rs::rand::SystemRandom::new(),
+                 message.as_bytes(),
+                 &mut sig_bytes,
+             )
+--- a/src/util.rs
++++ b/src/util.rs
+@@ -43,9 +43,9 @@
+ }
+ 
+ #[cfg(any(feature = "aws", feature = "azure"))]
+-pub(crate) fn hmac_sha256(secret: impl AsRef<[u8]>, bytes: impl AsRef<[u8]>) -> ring::hmac::Tag {
+-    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_ref());
+-    ring::hmac::sign(&key, bytes.as_ref())
++pub(crate) fn hmac_sha256(secret: impl AsRef<[u8]>, bytes: impl AsRef<[u8]>) -> aws_lc_rs::hmac::Tag {
++    let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, secret.as_ref());
++    aws_lc_rs::hmac::sign(&key, bytes.as_ref())
+ }
+ 
+ /// Collect a stream into [`Bytes`] avoiding copying in the event of a single chunk
+@@ -310,7 +310,7 @@
+ /// Computes the SHA256 digest of `body` returned as a hex encoded string
+ #[cfg(any(feature = "aws", feature = "gcp"))]
+ pub(crate) fn hex_digest(bytes: &[u8]) -> String {
+-    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
++    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, bytes);
+     hex_encode(digest.as_ref())
+ }
+ 

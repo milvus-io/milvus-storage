@@ -1,0 +1,91 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index d4f978c..4c0e2ff 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -81,14 +81,9 @@ __rustls = [
+     "dep:hyper-rustls",
+     "dep:tokio-rustls",
+     "dep:rustls",
++    "rustls?/fips",
+     "__tls",
+ ]
+-__rustls-aws-lc-rs = [
+-    "hyper-rustls?/aws-lc-rs",
+-    "tokio-rustls?/aws-lc-rs",
+-    "rustls?/aws-lc-rs",
+-    "quinn?/rustls-aws-lc-rs",
+-]
+ __tls = [
+     "dep:rustls-pki-types",
+     "tokio/io-util",
+@@ -167,7 +162,6 @@ query = [
+     "dep:serde_urlencoded",
+ ]
+ rustls = [
+-    "__rustls-aws-lc-rs",
+     "dep:rustls-platform-verifier",
+     "__rustls",
+ ]
+diff --git a/src/async_impl/client.rs b/src/async_impl/client.rs
+index 4996a4c..e3c4434 100644
+--- a/src/async_impl/client.rs
++++ b/src/async_impl/client.rs
+@@ -640,6 +640,11 @@ impl ClientBuilder {
+                 ),
+                 #[cfg(feature = "__rustls")]
+                 TlsBackend::BuiltRustls(conn) => {
++                    if !conn.fips() {
++                        return Err(crate::error::builder(
++                            "Rustls client configuration is not in FIPS mode",
++                        ));
++                    }
+                     #[cfg(feature = "http3")]
+                     {
+                         let mut h3_tls = conn.clone();
+@@ -714,11 +719,7 @@ impl ClientBuilder {
+                         return Err(crate::error::builder("empty supported tls versions"));
+                     }
+ 
+-                    // Allow user to have installed a runtime default.
+-                    // If not, we ship with _our_ recommended default.
+-                    let provider = rustls::crypto::CryptoProvider::get_default()
+-                        .map(|arc| arc.clone())
+-                        .unwrap_or_else(default_rustls_crypto_provider);
++                    let provider = Arc::new(rustls::crypto::default_fips_provider());
+ 
+                     // Build TLS config
+                     let signature_algorithms = provider.signature_verification_algorithms;
+@@ -813,6 +814,11 @@ impl ClientBuilder {
+                         config_builder.with_no_client_auth()
+                     };
+ 
++                    if !tls.fips() {
++                        return Err(crate::error::builder(
++                            "Rustls client configuration is not in FIPS mode",
++                        ));
++                    }
+                     tls.enable_sni = config.tls_sni;
+ 
+                     if config.tls_sslkeylogfile {
+@@ -2478,21 +2484,6 @@ impl Default for Client {
+     }
+ }
+ 
+-#[cfg(feature = "__rustls")]
+-fn default_rustls_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
+-    #[cfg(not(feature = "__rustls-aws-lc-rs"))]
+-    panic!(
+-        "No rustls crypto provider is configured. \
+-        When using the `rustls-no-provider` feature you must install a \
+-        crypto provider before building a Client. For example: \
+-        `rustls::crypto::aws_lc_rs::default_provider().install_default().unwrap();` \
+-        See https://docs.rs/rustls/latest/rustls/#cryptography-providers for details."
+-    );
+-
+-    #[cfg(feature = "__rustls-aws-lc-rs")]
+-    Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+-}
+-
+ impl Client {
+     /// Constructs a new `Client`.
+     ///

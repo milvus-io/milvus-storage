@@ -56,6 +56,8 @@ pub(crate) fn configure_rust_runtime(
     worker_threads: u32,
     max_blocking_threads: u32,
 ) -> anyhow::Result<()> {
+    #[cfg(feature = "fips")]
+    crate::rustls_fips::require()?;
     RUST_RUNTIME.configure(worker_threads as usize, max_blocking_threads as usize)
 }
 
@@ -72,6 +74,9 @@ fn default_runtime_thread_count() -> usize {
 /// Lance, Iceberg, and Vortex all run through this runtime so the bridge does
 /// not create separate Tokio worker and blocking thread pools per format.
 pub(crate) static TOKIO_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    #[cfg(feature = "fips")]
+    crate::rustls_fips::require().expect("FIPS provider required before starting the Rust runtime");
+
     let config = {
         let mut state = RUST_RUNTIME.state.lock().unwrap();
         state.initialized = true;

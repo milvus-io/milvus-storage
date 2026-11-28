@@ -1,0 +1,26 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -92,9 +92,6 @@
+ [dependencies.serde_urlencoded]
+ version = "0.7"
+ 
+-[dependencies.sha1]
+-version = "0.11"
+-
+ [dev-dependencies.aws-credential-types]
+ version = "1.1.8"
+ 
+--- a/src/provide_credential/sso.rs
++++ b/src/provide_credential/sso.rs
+@@ -362,10 +362,7 @@
+ 
+ // Simple SHA1 implementation for cache key generation
+ fn hex_sha1(data: &[u8]) -> String {
+-    use sha1::{Digest, Sha1};
+-    let mut hasher = Sha1::new();
+-    hasher.update(data);
+-    hex::encode(hasher.finalize())
++    reqsign_core::hash::hex_sha1(data)
+ }
+ 
+ #[cfg(test)]

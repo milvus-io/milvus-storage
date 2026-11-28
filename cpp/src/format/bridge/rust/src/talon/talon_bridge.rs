@@ -114,6 +114,9 @@ pub fn new_talon_client(
     namespace_name: &str,
     credential_broker: &str,
 ) -> Result<Box<TalonClient>> {
+    #[cfg(feature = "fips")]
+    crate::rustls_fips::require()?;
+
     Ok(Box::new(TalonClient {
         inner: Arc::new(TalonClientState {
             client: Arc::new(

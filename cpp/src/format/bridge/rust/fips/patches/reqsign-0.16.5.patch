@@ -1,0 +1,208 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -75,7 +75,7 @@
+     "dep:serde",
+     "dep:serde_json",
+     "dep:jsonwebtoken",
+-    "dep:rsa",
++    "dep:pem",
+ ]
+ services-huaweicloud = [
+     "dep:serde",
+@@ -113,6 +113,11 @@
+ [dependencies.async-trait]
+ version = "0.1"
+ 
++[dependencies.aws-lc-rs]
++version = "=1.18.2"
++features = ["fips", "alloc"]
++default-features = false
++
+ [dependencies.base64]
+ version = "0.22"
+ 
+@@ -125,9 +130,6 @@
+ [dependencies.hex]
+ version = "0.4"
+ 
+-[dependencies.hmac]
+-version = "0.12"
+-
+ [dependencies.http]
+ version = "1.1"
+ 
+@@ -140,6 +142,10 @@
+ 
+ [dependencies.once_cell]
+ version = "1"
++optional = true
++
++[dependencies.pem]
++version = "3"
+ optional = true
+ 
+ [dependencies.percent-encoding]
+@@ -179,13 +185,6 @@
+ version = "1"
+ optional = true
+ 
+-[dependencies.sha1]
+-version = "0.10"
+-
+-[dependencies.sha2]
+-version = "0.10"
+-features = ["oid"]
+-
+ [dependencies.toml]
+ version = "0.8.9"
+ optional = true
+--- a/src/hash.rs
++++ b/src/hash.rs
+@@ -2,13 +2,9 @@
+ 
+ use anyhow::anyhow;
+ use anyhow::Result;
++use aws_lc_rs::{digest, hmac};
+ use base64::prelude::BASE64_STANDARD;
+ use base64::Engine;
+-use hmac::Hmac;
+-use hmac::Mac;
+-use sha1::Sha1;
+-use sha2::Digest;
+-use sha2::Sha256;
+ 
+ /// Base64 encode
+ pub fn base64_encode(content: &[u8]) -> String {
+@@ -25,7 +21,7 @@
+ /// SHA256 hash.
+ #[allow(dead_code)]
+ pub fn sha256(content: &[u8]) -> Vec<u8> {
+-    Sha256::digest(content).as_slice().to_vec()
++    digest::digest(&digest::SHA256, content).as_ref().to_vec()
+ }
+ 
+ /// Hex encoded SHA1 hash.
+@@ -33,7 +29,7 @@
+ /// Use this function instead of `hex::encode(sha1(content))` can reduce
+ /// extra copy.
+ pub fn hex_sha1(content: &[u8]) -> String {
+-    hex::encode(Sha1::digest(content).as_slice())
++    hex::encode(digest::digest(&digest::SHA1_FOR_LEGACY_USE_ONLY, content))
+ }
+ 
+ /// Hex encoded SHA256 hash.
+@@ -41,23 +37,19 @@
+ /// Use this function instead of `hex::encode(sha256(content))` can reduce
+ /// extra copy.
+ pub fn hex_sha256(content: &[u8]) -> String {
+-    hex::encode(Sha256::digest(content).as_slice())
++    hex::encode(digest::digest(&digest::SHA256, content))
+ }
+ 
+ /// HMAC with SHA256 hash.
+ pub fn hmac_sha256(key: &[u8], content: &[u8]) -> Vec<u8> {
+-    let mut h = Hmac::<Sha256>::new_from_slice(key).expect("invalid key length");
+-    h.update(content);
+-
+-    h.finalize().into_bytes().to_vec()
++    let signature = sign_hmac(hmac::HMAC_SHA256, key, content);
++    signature.as_ref().to_vec()
+ }
+ 
+ /// Base64 encoded HMAC with SHA256 hash.
+ pub fn base64_hmac_sha256(key: &[u8], content: &[u8]) -> String {
+-    let mut h = Hmac::<Sha256>::new_from_slice(key).expect("invalid key length");
+-    h.update(content);
+-
+-    base64_encode(&h.finalize().into_bytes())
++    let signature = sign_hmac(hmac::HMAC_SHA256, key, content);
++    base64_encode(signature.as_ref())
+ }
+ 
+ /// Hex encoded HMAC with SHA1 hash.
+@@ -65,10 +57,8 @@
+ /// Use this function instead of `hex::encode(hmac_sha1(key, content))` can
+ /// reduce extra copy.
+ pub fn hex_hmac_sha1(key: &[u8], content: &[u8]) -> String {
+-    let mut h = Hmac::<Sha1>::new_from_slice(key).expect("invalid key length");
+-    h.update(content);
+-
+-    hex::encode(h.finalize().into_bytes())
++    let signature = sign_hmac(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, key, content);
++    hex::encode(signature)
+ }
+ 
+ /// Hex encoded HMAC with SHA256 hash.
+@@ -76,16 +66,16 @@
+ /// Use this function instead of `hex::encode(hmac_sha256(key, content))` can
+ /// reduce extra copy.
+ pub fn hex_hmac_sha256(key: &[u8], content: &[u8]) -> String {
+-    let mut h = Hmac::<Sha256>::new_from_slice(key).expect("invalid key length");
+-    h.update(content);
+-
+-    hex::encode(h.finalize().into_bytes())
++    let signature = sign_hmac(hmac::HMAC_SHA256, key, content);
++    hex::encode(signature)
+ }
+ 
+ /// Base64 encoded HMAC with SHA1 hash.
+ pub fn base64_hmac_sha1(key: &[u8], content: &[u8]) -> String {
+-    let mut h = Hmac::<Sha1>::new_from_slice(key).expect("invalid key length");
+-    h.update(content);
++    let signature = sign_hmac(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, key, content);
++    base64_encode(signature.as_ref())
++}
+ 
+-    base64_encode(&h.finalize().into_bytes())
++fn sign_hmac(algorithm: hmac::Algorithm, key: &[u8], content: &[u8]) -> hmac::Tag {
++    hmac::sign(&hmac::Key::new(algorithm, key), content)
+ }
+--- a/src/google/signer.rs
++++ b/src/google/signer.rs
+@@ -2,13 +2,11 @@
+ use std::time::Duration;
+ 
+ use anyhow::Result;
++use aws_lc_rs::{rand::SystemRandom, signature};
+ use http::header;
+ use log::debug;
+ use percent_encoding::percent_decode_str;
+ use percent_encoding::utf8_percent_encode;
+-use rsa::pkcs1v15::SigningKey;
+-use rsa::pkcs8::DecodePrivateKey;
+-use rsa::signature::RandomizedSigner;
+ 
+ use super::constants::GOOG_QUERY_ENCODE_SET;
+ use super::credential::Credential;
+@@ -136,13 +134,24 @@
+         };
+         debug!("calculated string to sign: {string_to_sign}");
+ 
+-        let mut rng = rand::thread_rng();
+-        let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(&cred.private_key)?;
+-        let signing_key = SigningKey::<sha2::Sha256>::new(private_key);
+-        let signature = signing_key.sign_with_rng(&mut rng, string_to_sign.as_bytes());
+-
+-        ctx.query
+-            .push(("X-Goog-Signature".to_string(), signature.to_string()));
++        let private_key = pem::parse(&cred.private_key)?;
++        anyhow::ensure!(
++            private_key.tag() == "PRIVATE KEY",
++            "expected PKCS#8 RSA private key"
++        );
++        let key_pair = signature::RsaKeyPair::from_pkcs8(private_key.contents())?;
++        let mut signature_bytes = vec![0; key_pair.public_modulus_len()];
++        key_pair.sign(
++            &signature::RSA_PKCS1_SHA256,
++            &SystemRandom::new(),
++            string_to_sign.as_bytes(),
++            &mut signature_bytes,
++        )?;
++
++        ctx.query.push((
++            "X-Goog-Signature".to_string(),
++            hex::encode_upper(signature_bytes),
++        ));
+ 
+         Ok(ctx)
+     }

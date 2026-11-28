@@ -1030,11 +1030,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-lc-fips-sys"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03367707e92796b190a4207d4d39b0a4271d574503d2969c2b0cfbf5c87658ee"
+dependencies = [
+ "bindgen",
+ "cc",
+ "cmake",
+ "dunce",
+ "fs_extra",
+ "pkg-config",
+ "regex",
+]
+
+[[package]]
 name = "aws-lc-rs"
 version = "1.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faac5829c2b74c28f830747e7818ccfb684261b5f48a1118b1e2a13d36dfab13"
 dependencies = [
+ "aws-lc-fips-sys",
  "aws-lc-sys",
  "zeroize",
 ]
@@ -1455,6 +1471,8 @@ dependencies = [
  "cexpr",
  "clang-sys",
  "itertools 0.13.0",
+ "log",
+ "prettyplease",
  "proc-macro2",
  "quote",
  "regex",
@@ -7633,6 +7651,8 @@ dependencies = [
  "async-compat",
  "async-stream",
  "async-trait",
+ "aws-lc-fips-sys",
+ "aws-lc-rs",
  "base64 0.22.1",
  "bytes",
  "chrono",
@@ -7659,6 +7679,7 @@ dependencies = [
  "parquet 58.3.0",
  "paste",
  "roaring",
+ "rustls",
  "serde",
  "serde_json",
  "snafu 0.9.1",

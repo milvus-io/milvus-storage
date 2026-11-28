@@ -1,0 +1,20 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 8b65031..5305d9f 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -84,14 +84,10 @@ alloc = [
+     "pki-types/alloc",
+ ]
+ aws-lc-rs = [
+-    "dep:aws-lc-rs",
+-    "aws-lc-rs/aws-lc-sys",
+-    "aws-lc-rs/prebuilt-nasm",
+-]
+-aws-lc-rs-fips = [
+     "dep:aws-lc-rs",
+     "aws-lc-rs/fips",
+ ]
++aws-lc-rs-fips = ["aws-lc-rs"]
+ aws-lc-rs-unstable = ["aws-lc-rs"]
+ default = ["std"]
+ ring = ["dep:ring"]

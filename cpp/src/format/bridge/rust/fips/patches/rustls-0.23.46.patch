@@ -1,0 +1,29 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index dd67ad5..ba3ea74 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -57,9 +57,8 @@ enum_no_repr_variant_discriminant_changed = "warn"
+ aws-lc-rs = ["aws_lc_rs"]
+ aws_lc_rs = [
+     "dep:aws-lc-rs",
+-    "webpki/aws-lc-rs",
+-    "aws-lc-rs/aws-lc-sys",
+-    "aws-lc-rs/prebuilt-nasm",
++    "webpki/aws-lc-rs-fips",
++    "aws-lc-rs/fips",
+ ]
+ brotli = [
+     "dep:brotli",
+@@ -74,11 +73,7 @@ default = [
+     "std",
+     "tls12",
+ ]
+-fips = [
+-    "aws_lc_rs",
+-    "aws-lc-rs?/fips",
+-    "webpki/aws-lc-rs-fips",
+-]
++fips = ["aws_lc_rs"]
+ logging = ["log"]
+ prefer-post-quantum = ["aws_lc_rs"]
+ read_buf = [

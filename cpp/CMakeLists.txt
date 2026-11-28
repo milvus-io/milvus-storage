@@ -15,6 +15,12 @@ option(WITH_PYTHON_BINDING "Build for Python bindings with hidden symbols." OFF)
 option(WITH_FIU "Build with fault injection support (libfiu)." OFF)
 option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
 
+# Milvus passes the existing switch through its build environment. A standalone
+# CMake build can also set the same variable on the command line.
+if(NOT DEFINED MILVUS_FIPS_ENABLED)
+  set(MILVUS_FIPS_ENABLED "$ENV{MILVUS_FIPS_ENABLED}")
+endif()
+
 include(GNUInstallDirs)
 
 find_package(Boost REQUIRED)
@@ -87,6 +93,15 @@ list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/bridge/.*\\.(cpp|cc)$")
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
 
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
+if (MILVUS_FIPS_ENABLED)
+  set(fips_symbol_check "${RUST_BRIDGE_PATH}/fips/verify-storage.sh")
+  set_property(TARGET milvus-storage APPEND PROPERTY LINK_DEPENDS "${fips_symbol_check}")
+  add_custom_command(TARGET milvus-storage POST_BUILD
+    COMMAND bash "${fips_symbol_check}"
+      "${CMAKE_NM}" "$<TARGET_FILE:milvus-storage>"
+    VERBATIM
+  )
+endif()
 
 list(APPEND LINK_LIBS
   arrow::arrow

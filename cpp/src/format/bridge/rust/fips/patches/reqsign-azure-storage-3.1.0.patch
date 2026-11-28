@@ -1,0 +1,116 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -41,6 +41,11 @@
+ [dependencies.anyhow]
+ version = "1"
+ 
++[dependencies.aws-lc-rs]
++version = "=1.18.2"
++features = ["fips", "alloc"]
++default-features = false
++
+ [dependencies.base64]
+ version = "0.22"
+ 
+@@ -68,9 +73,6 @@
+ 
+ [dependencies.serde_json]
+ version = "1"
+-
+-[dependencies.sha1]
+-version = "0.11"
+ 
+ [dev-dependencies.env_logger]
+ version = "0.11"
+@@ -101,9 +103,3 @@
+ version = "3.1.0"
+ features = ["jwt"]
+ 
+-[target.'cfg(not(target_arch = "wasm32"))'.dependencies.rsa]
+-version = "0.9.2"
+-features = [
+-    "pkcs5",
+-    "sha2",
+-]
+--- a/src/provide_credential/client_certificate.rs
++++ b/src/provide_credential/client_certificate.rs
+@@ -19,14 +19,12 @@
+ use std::time::{Duration, SystemTime, UNIX_EPOCH};
+ 
+ use crate::credential::Credential;
++use aws_lc_rs::digest;
+ use base64::Engine;
+ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+ use reqsign_core::time::Timestamp;
+ use reqsign_core::{Context, ProvideCredential};
+-use rsa::RsaPrivateKey;
+-use rsa::pkcs8::DecodePrivateKey;
+ use serde::{Deserialize, Serialize};
+-use sha1::{Digest, Sha1};
+ 
+ /// Generate a unique JWT ID using timestamp and a pseudo-random component
+ fn generate_jti(now: u64) -> String {
+@@ -96,7 +94,7 @@
+         &self,
+         ctx: &Context,
+         path: &str,
+-    ) -> Result<(Vec<u8>, RsaPrivateKey), reqsign_core::Error> {
++    ) -> Result<(Vec<u8>, String), reqsign_core::Error> {
+         let cert_data = ctx.file_read(path).await.map_err(|e| {
+             reqsign_core::Error::credential_invalid(format!("Failed to read certificate file: {e}"))
+         })?;
+@@ -137,20 +135,13 @@
+             reqsign_core::Error::credential_invalid("PEM does not contain a private key")
+         })?;
+ 
+-        // Parse private key
+-        let private_key = RsaPrivateKey::from_pkcs8_pem(&private_key_pem).map_err(|e| {
+-            reqsign_core::Error::credential_invalid(format!(
+-                "Failed to parse private key from PEM: {e}"
+-            ))
+-        })?;
+-
+-        Ok((cert_der, private_key))
++        Ok((cert_der, private_key_pem))
+     }
+ 
+     /// Calculate certificate thumbprint (x5t)
+     /// Azure AD expects SHA1 thumbprint for x5t field
+     fn calculate_thumbprint(&self, cert_der: &[u8]) -> String {
+-        let hash = Sha1::digest(cert_der);
++        let hash = digest::digest(&digest::SHA1_FOR_LEGACY_USE_ONLY, cert_der);
+         URL_SAFE_NO_PAD.encode(hash)
+     }
+ 
+@@ -160,7 +151,7 @@
+         tenant_id: &str,
+         client_id: &str,
+         cert_der: &[u8],
+-        private_key: &RsaPrivateKey,
++        private_key_pem: &str,
+     ) -> Result<String, reqsign_core::Error> {
+         let now = SystemTime::now()
+             .duration_since(UNIX_EPOCH)
+@@ -184,7 +175,7 @@
+             x5t: self.calculate_thumbprint(cert_der),
+         };
+ 
+-        reqsign_core::jwt::encode_rs256(&header, &claims, private_key)
++        reqsign_core::jwt::encode_rs256_pem(&header, &claims, private_key_pem.as_bytes())
+     }
+ 
+     /// Exchange client assertion for access token
+@@ -299,11 +290,11 @@
+             };
+ 
+         // Load certificate and private key
+-        let (cert_der, private_key) = self.load_certificate(ctx, &certificate_path).await?;
++        let (cert_der, private_key_pem) = self.load_certificate(ctx, &certificate_path).await?;
+ 
+         // Create client assertion
+         let client_assertion =
+-            self.create_client_assertion(&tenant_id, &client_id, &cert_der, &private_key)?;
++            self.create_client_assertion(&tenant_id, &client_id, &cert_der, &private_key_pem)?;
+ 
+         // Exchange for access token
+         let token_response = self
