@@ -166,7 +166,13 @@ class StorageConan(ConanFile):
         self.requires("fmt/11.2.0#9e6db8ce0c09fbec6b24e461cf520c53", force=True)
         self.requires("prometheus-cpp/1.2.4#0918d66c13f97acb7809759f9de49b3f")
         self.requires("gflags/2.2.2#7671803f1dc19354cc90bd32874dcfda")
-        self.requires("boost/1.83.0#4e8a94ac1b88312af95eded83cd81ca8", force=True)
+        # boost/1.83.0@milvus/dev#b28dcffa carries the milvus-io/conanfiles#270
+        # fix for gcc-15/16 UB in boost::json emplace (value.ipp/value.hpp
+        # placement-new with unspecified ordering, value_ref missing move
+        # constructor), which crashes under gcc-16. The plain boost/1.83.0
+        # reference was never re-uploaded after the fix, only the @milvus/dev
+        # channel was, so the pin must reference the channel explicitly.
+        self.requires("boost/1.83.0@milvus/dev#b28dcffaf033d2578693838cde973f64", force=True)
         self.requires("arrow/17.0.0@milvus/dev-2.6#c743ea7a6f2420ba5811b2be3df59892")
         self.requires("openssl/3.3.2#9f9f130d58e7c13e76bb8a559f0a6a8b", force=True, override=True)
         self.requires("zlib/1.3.1#8045430172a5f8d56ba001b14561b4ea")
