@@ -29,7 +29,8 @@ ifeq ($(uname_s),Darwin)
 endif
 
 # Common conan flags
-CONAN_SETTINGS = ${libcxx_setting} -s:h build_type=${build_type} -s:b build_type=${build_type}
+fips_enabled := $(if $(filter ON,$(MILVUS_FIPS_ENABLED)),True,False)
+CONAN_SETTINGS = ${libcxx_setting} -s:h build_type=${build_type} -s:b build_type=${build_type} -o "&:MILVUS_FIPS_ENABLED=${fips_enabled}"
 CONAN_BASE = conan install .. --build=arrow --build=missing ${CONAN_SETTINGS}
 
 build:

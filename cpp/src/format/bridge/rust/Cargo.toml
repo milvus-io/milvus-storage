@@ -10,9 +10,14 @@ crate-type = ["staticlib"]
 [features]
 io-trace = []
 talon = ["dep:talon"]
+fips = ["dep:aws-lc-rs", "dep:aws-lc-fips-sys", "dep:rustls"]
 
 [dependencies]
 talon = { package = "talon-rust-client", git = "https://github.com/milvus-io/talon.git", rev = "84da28febc76d78ef3eaba6005a1d7f1178c0787", optional = true }
+aws-lc-rs = { version = "=1.18.2", default-features = false, features = ["fips"], optional = true }
+# The FIPS build supplies the separately built 4.0.0 module to this binding.
+aws-lc-fips-sys = { version = "=0.14.2", default-features = false, optional = true }
+rustls = { version = "=0.23.46", default-features = false, features = ["fips", "std", "tls12"], optional = true }
 
 # common dependencies
 anyhow = "1.0.99"

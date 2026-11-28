@@ -1,4 +1,6 @@
-cmake_policy(SET CMP0135 NEW)
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
 
 include(FetchContent)
 FetchContent_Declare(
@@ -8,15 +10,28 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Corrosion)
 
+set(storage_cargo_manifest "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml")
+if (MILVUS_FIPS_ENABLED)
+    include(fips/FipsRust.cmake)
+    prepare_storage_rust_fips(storage_cargo_manifest)
+    list(APPEND CORROSION_FEATURES fips)
+    set(storage_cargo_lock LOCKED)
+endif()
+
 corrosion_import_crate(
-    MANIFEST_PATH ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml
+    MANIFEST_PATH "${storage_cargo_manifest}"
     FEATURES ${CORROSION_FEATURES}
     CRATES rust-bridge
+    ${storage_cargo_lock}
 )
 
 corrosion_set_env_vars(rust_bridge
     "RUSTFLAGS=-C force-frame-pointers=yes"
 )
+
+if (MILVUS_FIPS_ENABLED)
+    link_storage_rust_fips()
+endif()
 
 # corrosion_add_cxxbridge can only import a single static library; 
 # otherwise, `rlib` will conflict.

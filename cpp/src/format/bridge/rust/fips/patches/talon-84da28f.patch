@@ -1,0 +1,448 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 392abc5..c6271c9 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -88,9 +88,9 @@ etcd-client = { version = "0.19", default-features = false, features = ["tls", "
+ percent-encoding = "2"
+ tonic = { version = "0.14", default-features = false }
+ url = "2"
+-rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
+-rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }
+-tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring"] }
++rustls = { version = "=0.23.46", default-features = false, features = ["std"] }
++rustls-webpki = { version = "0.103", default-features = false, features = ["std"] }
++tokio-rustls = { version = "0.26", default-features = false, features = ["logging"] }
+ x509-cert = { version = "0.2", default-features = false, features = ["std"] }
+ 
+ [patch.crates-io]
+diff --git a/clients/rust/Cargo.toml b/clients/rust/Cargo.toml
+index e7c26ae..6c3bf96 100644
+--- a/clients/rust/Cargo.toml
++++ b/clients/rust/Cargo.toml
+@@ -20,4 +20,5 @@ thiserror.workspace = true
+ tokio.workspace = true
+ 
+ [features]
++fips = ["talon-backend/fips", "talon-transport/fips"]
+ telemetry = ["talon-telemetry/export"]
+diff --git a/crates/talon-backend/Cargo.toml b/crates/talon-backend/Cargo.toml
+index b784cc8..f623a23 100644
+--- a/crates/talon-backend/Cargo.toml
++++ b/crates/talon-backend/Cargo.toml
+@@ -24,19 +24,20 @@ arc-swap = "1.9"
+ async-trait.workspace = true
+ bytes.workspace = true
+ futures.workspace = true
+-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
++reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider", "stream"] }
+ tokio = { workspace = true, features = ["time"] }
+ tracing.workspace = true
+ tokio-util.workspace = true
+ url.workspace = true
+ sha2 = "0.10"
+ hmac = "0.12"
++aws-lc-rs = { version = "=1.18.2", default-features = false, optional = true }
+ base64 = "0.22"
+ chrono = { version = "0.4", default-features = false, features = ["std"] }
+ # Native IAM discovery follows the cloud SDK defaults, like milvus-storage.
+ aws-config = { version = "1.12", default-features = false, features = ["rt-tokio", "credentials-process", "sso"] }
+ aws-credential-types = "1.3"
+-aws-smithy-http-client = { version = "1.5", default-features = false, features = ["rustls-ring", "rt-tokio"] }
++aws-smithy-http-client = { version = "1.5", default-features = false, features = ["rt-tokio"] }
+ google-cloud-auth = { version = "1.17", default-features = false }
+ rustls.workspace = true
+ 
+@@ -50,5 +51,6 @@ tempfile.workspace = true
+ tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
+ 
+ [features]
++fips = ["rustls/fips", "aws-smithy-http-client/rustls-aws-lc-fips", "dep:aws-lc-rs", "aws-lc-rs/fips"]
+ uring = ["dep:monoio-codec", "dep:libc", "dep:talon-uring", "dep:monoio", "dep:monoio-http", "dep:zeroize", "dep:webpki-roots", "dep:http"]
+ telemetry = ["talon-telemetry/export"]
+diff --git a/crates/talon-backend/src/azure_sharedkey.rs b/crates/talon-backend/src/azure_sharedkey.rs
+index 95c9515..ab94122 100644
+--- a/crates/talon-backend/src/azure_sharedkey.rs
++++ b/crates/talon-backend/src/azure_sharedkey.rs
+@@ -14,12 +14,9 @@
+ 
+ use base64::engine::general_purpose::STANDARD as BASE64;
+ use base64::Engine;
+-use hmac::{Hmac, Mac};
+-use sha2::Sha256;
+ 
+ use crate::http::{HttpRequest, Method};
+-
+-type HmacSha256 = Hmac<Sha256>;
++use crate::sigv4::hmac;
+ 
+ /// Format a `SystemTime` as an RFC 1123 date in GMT (the `x-ms-date` format),
+ /// e.g. `Fri, 26 Jun 2015 23:39:12 GMT`.
+@@ -172,9 +169,7 @@ pub fn authorization_header(
+         canonical_resource = canonical_resource,
+     );
+ 
+-    let mut mac = HmacSha256::new_from_slice(&key).map_err(|e| e.to_string())?;
+-    mac.update(string_to_sign.as_bytes());
+-    let signature = BASE64.encode(mac.finalize().into_bytes());
++    let signature = BASE64.encode(hmac(&key, string_to_sign.as_bytes()));
+     Ok(format!("SharedKey {account}:{signature}"))
+ }
+ 
+diff --git a/crates/talon-backend/src/reqwest_client.rs b/crates/talon-backend/src/reqwest_client.rs
+index 8d4431c..a9e3173 100644
+--- a/crates/talon-backend/src/reqwest_client.rs
++++ b/crates/talon-backend/src/reqwest_client.rs
+@@ -32,6 +32,35 @@ const REQUEST_BACKSTOP_TIMEOUT: std::time::Duration = std::time::Duration::from_
+ /// How long an idle pooled connection is kept before being dropped.
+ const POOL_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+ 
++#[cfg(feature = "fips")]
++pub(crate) fn ensure_fips_provider() -> Result<(), &'static str> {
++    use rustls::crypto::CryptoProvider;
++
++    if CryptoProvider::get_default().is_none() {
++        let provider = rustls::crypto::default_fips_provider();
++        if !provider.fips() {
++            return Err("AWS-LC FIPS provider is unavailable");
++        }
++        let _ = provider.install_default();
++    }
++    if CryptoProvider::get_default().is_some_and(|provider| provider.fips()) {
++        Ok(())
++    } else {
++        Err("process Rustls provider must support FIPS")
++    }
++}
++
++pub(crate) fn client_builder() -> Result<reqwest::ClientBuilder, &'static str> {
++    let builder = reqwest::Client::builder();
++    #[cfg(feature = "fips")]
++    let builder = {
++        ensure_fips_provider()?;
++        // Cargo feature unification can also enable reqwest's native-TLS backend.
++        builder.use_rustls_tls()
++    };
++    Ok(builder)
++}
++
+ /// A `reqwest`-backed HTTP client.
+ pub struct ReqwestClient {
+     inner: reqwest::Client,
+@@ -49,14 +78,19 @@ impl ReqwestClient {
+     /// establishing a connection is size-independent, so a slow connect is
+     /// always a fault.
+     pub fn new() -> Self {
+-        let inner = reqwest::Client::builder()
++        let inner = client_builder()
++            .expect("initialize TLS for Talon HTTP client")
+             .connect_timeout(CONNECT_TIMEOUT)
+             .timeout(REQUEST_BACKSTOP_TIMEOUT)
+             .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+-            .build()
++            .build();
++        #[cfg(not(feature = "fips"))]
++        let inner = inner
+             // The builder only fails if the TLS backend cannot initialize, which
+             // is a process-level fault; fall back so construction stays infallible.
+             .unwrap_or_else(|_| reqwest::Client::new());
++        #[cfg(feature = "fips")]
++        let inner = inner.expect("build Talon FIPS HTTP client");
+         Self { inner }
+     }
+ 
+diff --git a/crates/talon-backend/src/s3.rs b/crates/talon-backend/src/s3.rs
+index f7e8ffe..8723bfe 100644
+--- a/crates/talon-backend/src/s3.rs
++++ b/crates/talon-backend/src/s3.rs
+@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
+ use std::sync::Arc;
+ 
+ use async_trait::async_trait;
++#[cfg(not(feature = "fips"))]
+ use sha2::{Digest, Sha256};
+ use talon_core::{
+     BackendStore, Error, ListPage, ListedObject, ObjectId, ObjectStat, Result, Version,
+@@ -762,7 +763,10 @@ fn hash_file(path: PathBuf, len: u64) -> Result<String> {
+     let file = std::fs::File::open(&path)
+         .map_err(|error| Error::Backend(format!("open {} for hashing: {error}", path.display())))?;
+     let mut reader: Take<std::fs::File> = file.take(len);
++    #[cfg(not(feature = "fips"))]
+     let mut hasher = Sha256::new();
++    #[cfg(feature = "fips")]
++    let mut hasher = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256);
+     let mut buffer = vec![0u8; 1024 * 1024];
+     let mut read_len = 0u64;
+     loop {
+@@ -781,7 +785,11 @@ fn hash_file(path: PathBuf, len: u64) -> Result<String> {
+             path.display()
+         )));
+     }
+-    Ok(format!("{:x}", hasher.finalize()))
++    #[cfg(not(feature = "fips"))]
++    let digest = hasher.finalize();
++    #[cfg(feature = "fips")]
++    let digest = hasher.finish();
++    Ok(crate::sigv4::to_hex(digest.as_ref()))
+ }
+ 
+ /// Normalize an S3 ETag into a [`Version`] (strip surrounding quotes).
+diff --git a/crates/talon-backend/src/sigv4.rs b/crates/talon-backend/src/sigv4.rs
+index bc0b4ea..ee871f1 100644
+--- a/crates/talon-backend/src/sigv4.rs
++++ b/crates/talon-backend/src/sigv4.rs
+@@ -14,30 +14,44 @@
+ 
+ use std::time::{SystemTime, UNIX_EPOCH};
+ 
++#[cfg(not(feature = "fips"))]
+ use hmac::{Hmac, Mac};
++#[cfg(not(feature = "fips"))]
+ use sha2::{Digest, Sha256};
+ 
+ use crate::http::{HttpRequest, Method};
+ use crate::s3::S3Credentials;
+ 
+-type HmacSha256 = Hmac<Sha256>;
+-
+ /// SHA-256 of `bytes`, lowercase hex.
++#[cfg(not(feature = "fips"))]
+ fn sha256_hex(bytes: &[u8]) -> String {
+     let mut h = Sha256::new();
+     h.update(bytes);
+     to_hex(&h.finalize())
+ }
+ 
++#[cfg(feature = "fips")]
++fn sha256_hex(bytes: &[u8]) -> String {
++    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, bytes);
++    to_hex(digest.as_ref())
++}
++
+ /// HMAC-SHA256(`key`, `msg`) raw bytes.
+-fn hmac(key: &[u8], msg: &[u8]) -> Vec<u8> {
+-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
++#[cfg(not(feature = "fips"))]
++pub(crate) fn hmac(key: &[u8], msg: &[u8]) -> Vec<u8> {
++    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
+     mac.update(msg);
+     mac.finalize().into_bytes().to_vec()
+ }
+ 
++#[cfg(feature = "fips")]
++pub(crate) fn hmac(key: &[u8], msg: &[u8]) -> Vec<u8> {
++    let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, key);
++    aws_lc_rs::hmac::sign(&key, msg).as_ref().to_vec()
++}
++
+ /// Lowercase hex encoding.
+-fn to_hex(bytes: &[u8]) -> String {
++pub(crate) fn to_hex(bytes: &[u8]) -> String {
+     const HEX: &[u8; 16] = b"0123456789abcdef";
+     let mut s = String::with_capacity(bytes.len() * 2);
+     for b in bytes {
+diff --git a/crates/talon-backend/src/workload_identity.rs b/crates/talon-backend/src/workload_identity.rs
+index a11868b..a29c7b2 100644
+--- a/crates/talon-backend/src/workload_identity.rs
++++ b/crates/talon-backend/src/workload_identity.rs
+@@ -198,7 +198,7 @@ fn metadata_origin(endpoint: Option<String>) -> Result<url::Url, String> {
+ /// VM metadata must not inherit origin proxies/retries or follow redirects.
+ /// One client is shared across all refreshes of the resolved provider.
+ fn metadata_http(timeout: Duration) -> Result<Arc<dyn HttpClient>, String> {
+-    let client = reqwest::Client::builder()
++    let client = crate::reqwest_client::client_builder()?
+         .no_proxy()
+         .redirect(reqwest::redirect::Policy::none())
+         .connect_timeout(Duration::from_secs(2))
+@@ -1312,8 +1312,15 @@ impl CredentialResolver for S3Resolver {
+                     return Err("no injected workload identity; AWS SDK IAM discovery requires the process-environment resolver".into());
+                 }
+                 use aws_smithy_http_client::tls::{rustls_provider::CryptoMode, Provider};
++                #[cfg(not(feature = "fips"))]
++                let mode = CryptoMode::Ring;
++                #[cfg(feature = "fips")]
++                let mode = {
++                    crate::reqwest_client::ensure_fips_provider()?;
++                    CryptoMode::AwsLcFips
++                };
+                 let http = aws_smithy_http_client::Builder::new()
+-                    .tls_provider(Provider::Rustls(CryptoMode::Ring)).build_https();
++                    .tls_provider(Provider::Rustls(mode)).build_https();
+                 let config = aws_config::provider_config::ProviderConfig::default().with_http_client(http);
+                 let mut builder = aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
+                     .configure(config);
+@@ -1375,7 +1382,10 @@ impl CredentialResolver for GcsResolver {
+                         "GCP ADC discovery requires the process-environment resolver".into(),
+                     );
+                 }
++                #[cfg(not(feature = "fips"))]
+                 let _ = rustls::crypto::ring::default_provider().install_default();
++                #[cfg(feature = "fips")]
++                crate::reqwest_client::ensure_fips_provider()?;
+                 let credentials = google_cloud_auth::credentials::Builder::default()
+                     .with_scopes(["https://www.googleapis.com/auth/cloud-platform"])
+                     .build_access_token_credentials()
+diff --git a/crates/talon-backend/src/zone.rs b/crates/talon-backend/src/zone.rs
+index 10e5778..05cb384 100644
+--- a/crates/talon-backend/src/zone.rs
++++ b/crates/talon-backend/src/zone.rs
+@@ -80,7 +80,7 @@ async fn kubernetes_node_zone(env: EnvFn<'_>) -> Result<Option<String>, String>
+         .map_err(|error| format!("cluster CA is unreadable: {error}"))?;
+     let certificate = reqwest::Certificate::from_pem(&ca)
+         .map_err(|_| "cluster CA is not valid PEM".to_string())?;
+-    let client = reqwest::Client::builder()
++    let client = crate::reqwest_client::client_builder()?
+         .add_root_certificate(certificate)
+         .connect_timeout(std::time::Duration::from_secs(2))
+         .timeout(std::time::Duration::from_secs(5))
+diff --git a/crates/talon-transport/Cargo.toml b/crates/talon-transport/Cargo.toml
+index 9fdd10d..e9ef40f 100644
+--- a/crates/talon-transport/Cargo.toml
++++ b/crates/talon-transport/Cargo.toml
+@@ -34,4 +34,5 @@ tempfile.workspace = true
+ tokio = { workspace = true, features = ["test-util"] }
+ 
+ [features]
++fips = ["rustls/fips"]
+ telemetry = ["talon-telemetry/export"]
+diff --git a/crates/talon-transport/src/control_tls.rs b/crates/talon-transport/src/control_tls.rs
+index 4d4f586..52f1e01 100644
+--- a/crates/talon-transport/src/control_tls.rs
++++ b/crates/talon-transport/src/control_tls.rs
+@@ -6,6 +6,7 @@ use std::time::Duration;
+ 
+ use anyhow::{Context, Result};
+ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
++use rustls::crypto::WebPkiSupportedAlgorithms;
+ use rustls::pki_types::pem::PemObject;
+ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+ use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+@@ -163,9 +164,17 @@ impl ControlTlsMaterial {
+     ) -> Result<Self> {
+         let roots = Arc::new(load_roots(config)?);
+         let certs = load_certificates(config)?;
+-        verify_local_chain(&certs, &roots, webpki::KeyUsage::server_auth())
++        #[cfg(feature = "fips")]
++        let provider = Arc::new(rustls::crypto::default_fips_provider());
++        #[cfg(not(feature = "fips"))]
++        let provider = Arc::new(rustls::crypto::ring::default_provider());
++        #[cfg(feature = "fips")]
++        anyhow::ensure!(provider.fips(), "control TLS requires a FIPS provider");
++
++        let algorithms = provider.signature_verification_algorithms;
++        verify_local_chain(&certs, &roots, algorithms, webpki::KeyUsage::server_auth())
+             .context("control TLS leaf is not valid for server authentication")?;
+-        verify_local_chain(&certs, &roots, webpki::KeyUsage::client_auth())
++        verify_local_chain(&certs, &roots, algorithms, webpki::KeyUsage::client_auth())
+             .context("control TLS leaf is not valid for client authentication")?;
+         let actual = certificate_identity(&certs[0])?;
+         if &actual != local_identity {
+@@ -174,7 +183,14 @@ impl ControlTlsMaterial {
+             );
+         }
+ 
+-        let server_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::clone(&roots))
++        #[cfg(not(feature = "fips"))]
++        let server_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::clone(&roots));
++        #[cfg(feature = "fips")]
++        let server_verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
++            Arc::clone(&roots),
++            Arc::clone(&provider),
++        );
++        let server_verifier = server_verifier
+             .build()
+             .context("build control TLS client-certificate verifier")?;
+         let server_verifier = Arc::new(IdentityClientVerifier {
+@@ -183,27 +199,53 @@ impl ControlTlsMaterial {
+             cluster_id: local_identity.cluster_id().to_owned(),
+             role: expected_peer_role,
+         });
+-        let server = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
++        #[cfg(not(feature = "fips"))]
++        let server = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13]);
++        #[cfg(feature = "fips")]
++        let server = ServerConfig::builder_with_provider(Arc::clone(&provider))
++            .with_protocol_versions(&[&rustls::version::TLS13])
++            .context("select control TLS server protocol")?;
++        let server = server
+             .with_client_cert_verifier(server_verifier)
+             .with_single_cert(certs.clone(), load_private_key(config)?)
+             .context("build control TLS server configuration")?;
+ 
+-        let chain_verifier = rustls::client::WebPkiServerVerifier::builder(Arc::clone(&roots))
++        #[cfg(not(feature = "fips"))]
++        let chain_verifier = rustls::client::WebPkiServerVerifier::builder(Arc::clone(&roots));
++        #[cfg(feature = "fips")]
++        let chain_verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
++            Arc::clone(&roots),
++            Arc::clone(&provider),
++        );
++        let chain_verifier = chain_verifier
+             .build()
+             .context("build control TLS server-certificate verifier")?;
+         let client_verifier = Arc::new(IdentityServerVerifier {
+             inner: chain_verifier,
+             roots,
++            algorithms,
+             trust_domain: config.trust_domain.clone(),
+             cluster_id: local_identity.cluster_id().to_owned(),
+             role: expected_peer_role,
+         });
+-        let client = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
++        #[cfg(not(feature = "fips"))]
++        let client = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13]);
++        #[cfg(feature = "fips")]
++        let client = ClientConfig::builder_with_provider(provider)
++            .with_protocol_versions(&[&rustls::version::TLS13])
++            .context("select control TLS client protocol")?;
++        let client = client
+             .dangerous()
+             .with_custom_certificate_verifier(client_verifier)
+             .with_client_auth_cert(certs, load_private_key(config)?)
+             .context("build control TLS client configuration")?;
+ 
++        #[cfg(feature = "fips")]
++        anyhow::ensure!(
++            client.fips() && server.fips(),
++            "control TLS requires FIPS configurations"
++        );
++
+         Ok(Self {
+             server: Arc::new(server),
+             client: Arc::new(client),
+@@ -214,12 +256,12 @@ impl ControlTlsMaterial {
+ fn verify_local_chain(
+     certificates: &[CertificateDer<'_>],
+     roots: &RootCertStore,
++    algorithms: WebPkiSupportedAlgorithms,
+     usage: webpki::KeyUsage,
+ ) -> Result<()> {
+-    let provider = rustls::crypto::ring::default_provider();
+     let leaf = webpki::EndEntityCert::try_from(&certificates[0])?;
+     leaf.verify_for_usage(
+-        provider.signature_verification_algorithms.all,
++        algorithms.all,
+         &roots.roots,
+         &certificates[1..],
+         UnixTime::now(),
+@@ -386,6 +428,7 @@ impl ClientCertVerifier for IdentityClientVerifier {
+ struct IdentityServerVerifier {
+     inner: Arc<dyn ServerCertVerifier>,
+     roots: Arc<RootCertStore>,
++    algorithms: WebPkiSupportedAlgorithms,
+     trust_domain: String,
+     cluster_id: String,
+     role: WorkloadRole,
+@@ -400,12 +443,11 @@ impl ServerCertVerifier for IdentityServerVerifier {
+         _ocsp_response: &[u8],
+         now: UnixTime,
+     ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+-        let provider = rustls::crypto::ring::default_provider();
+         let certificate = webpki::EndEntityCert::try_from(end_entity)
+             .map_err(|error| rustls::Error::General(error.to_string()))?;
+         certificate
+             .verify_for_usage(
+-                provider.signature_verification_algorithms.all,
++                self.algorithms.all,
+                 &self.roots.roots,
+                 intermediates,
+                 now,

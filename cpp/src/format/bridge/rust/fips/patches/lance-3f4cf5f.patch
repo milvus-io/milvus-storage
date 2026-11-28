@@ -1,0 +1,55 @@
+--- a/rust/lance-io/Cargo.toml
++++ b/rust/lance-io/Cargo.toml
+@@ -29,7 +29,8 @@
+ arrow-select.workspace = true
+ async-recursion.workspace = true
+ async-trait.workspace = true
+-aws-config = { workspace = true, optional = true }
++aws-config = { version = "1.2.0", optional = true, default-features = false, features = ["credentials-process", "rt-tokio", "sso"] }
++aws-smithy-http-client = { version = "1.5", optional = true, default-features = false, features = ["rustls-aws-lc-fips", "rt-tokio"] }
+ aws-credential-types = { workspace = true, optional = true }
+ byteorder.workspace = true
+ bytes.workspace = true
+@@ -71,7 +72,7 @@
+ default = ["aws", "azure", "gcp"]
+ gcs-test = []
+ gcp = ["object_store/gcp", "dep:opendal", "opendal/services-gcs", "dep:object_store_opendal"]
+-aws = ["object_store/aws", "dep:aws-config", "dep:aws-credential-types", "dep:opendal", "opendal/services-s3", "dep:object_store_opendal"]
++aws = ["object_store/aws", "dep:aws-config", "dep:aws-smithy-http-client", "dep:aws-credential-types", "dep:opendal", "opendal/services-s3", "dep:object_store_opendal"]
+ azure = ["object_store/azure", "dep:opendal", "opendal/services-azblob", "opendal/services-azdls", "dep:object_store_opendal"]
+ oss = ["dep:opendal", "opendal/services-oss", "dep:object_store_opendal"]
+ tencent = ["dep:opendal", "opendal/services-cos", "dep:object_store_opendal"]
+--- a/rust/lance-io/src/object_store/providers/aws.rs
++++ b/rust/lance-io/src/object_store/providers/aws.rs
+@@ -13,8 +13,14 @@
+ use object_store_opendal::OpendalStore;
+ use opendal::{Operator, services::S3};
+ 
+-use aws_config::default_provider::credentials::DefaultCredentialsChain;
++use aws_config::{
++    default_provider::credentials::DefaultCredentialsChain, provider_config::ProviderConfig,
++};
+ use aws_credential_types::provider::ProvideCredentials;
++use aws_smithy_http_client::{
++    Builder as HttpClientBuilder,
++    tls::{Provider, rustls_provider::CryptoMode},
++};
+ use object_store::{
+     ClientOptions, CredentialProvider, Result as ObjectStoreResult, RetryConfig,
+     StaticCredentialProvider,
+@@ -300,7 +306,14 @@
+     } else if let Some(creds) = storage_options_credentials {
+         Ok((Arc::new(creds), region))
+     } else {
+-        let credentials_provider = DefaultCredentialsChain::builder().build().await;
++        let http_client = HttpClientBuilder::new()
++            .tls_provider(Provider::Rustls(CryptoMode::AwsLcFips))
++            .build_https();
++        let provider_config = ProviderConfig::default().with_http_client(http_client);
++        let credentials_provider = DefaultCredentialsChain::builder()
++            .configure(provider_config)
++            .build()
++            .await;
+ 
+         Ok((
+             Arc::new(AwsCredentialAdapter::new(

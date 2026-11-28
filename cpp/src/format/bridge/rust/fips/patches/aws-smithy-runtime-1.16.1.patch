@@ -1,0 +1,31 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 11fed89..3781b47 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -59,7 +59,7 @@ connector-hyper-0-14-x = [
+ ]
+ default-https-client = [
+     "dep:aws-smithy-http-client",
+-    "aws-smithy-http-client?/rustls-aws-lc",
++    "aws-smithy-http-client?/rustls-aws-lc-fips",
+ ]
+ http-02x = [
+     "dep:http-02x",
+diff --git a/src/client/http.rs b/src/client/http.rs
+index b1fdfd7..255c28d 100644
+--- a/src/client/http.rs
++++ b/src/client/http.rs
+@@ -91,11 +91,11 @@ impl DefaultClientOptions {
+ pub(crate) fn default_https_client(options: DefaultClientOptions) -> Option<SharedHttpClient> {
+     use aws_smithy_http_client::proxy::ProxyConfig;
+     use aws_smithy_http_client::{tls, Builder, ConnectorBuilder};
+-    tracing::trace!("creating a new default hyper 1.x client using rustls<aws-lc>");
++    tracing::trace!("creating a new default hyper 1.x client using rustls<aws-lc-fips>");
+ 
+     let client = Builder::new().build_with_connector_fn(move |settings, runtime_components| {
+         let mut conn_builder = ConnectorBuilder::default().tls_provider(tls::Provider::Rustls(
+-            tls::rustls_provider::CryptoMode::AwsLc,
++            tls::rustls_provider::CryptoMode::AwsLcFips,
+         ));
+ 
+         conn_builder.set_connector_settings(settings.cloned());
