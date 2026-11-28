@@ -174,6 +174,13 @@ class StorageConan(ConanFile):
         # channel was, so the pin must reference the channel explicitly.
         self.requires("boost/1.83.0@milvus/dev#b28dcffaf033d2578693838cde973f64", force=True)
         self.requires("arrow/17.0.0@milvus/dev-2.6#c743ea7a6f2420ba5811b2be3df59892")
+        # Pin rapidjson to the newest cci snapshot, matching milvus-io/milvus
+        # internal/core/conanfile.py. Arrow 17 pulls rapidjson/1.1.0
+        # transitively, whose GenericStringRef::operator= assigns to the const
+        # members s/length; gcc-16's -Wtemplate-body and clang-23 both reject
+        # that as a hard error (fixed upstream as /* = delete */). force=True
+        # overrides Arrow's transitive version.
+        self.requires("rapidjson/cci.20230929#0a3982e5f4fa453a9b9cd0dd5b1dcb3a", force=True)
         self.requires("openssl/3.3.2#9f9f130d58e7c13e76bb8a559f0a6a8b", force=True, override=True)
         self.requires("zlib/1.3.1#8045430172a5f8d56ba001b14561b4ea")
         self.requires("libcurl/8.10.1#a3113369c86086b0e84231844e7ed0a9", force=True, override=True)
