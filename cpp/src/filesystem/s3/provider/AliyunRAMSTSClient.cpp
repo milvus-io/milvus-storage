@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMSTSClient.h"
+#include "milvus-storage/filesystem/s3/provider/STSClientUtils.h"
 
 #include "milvus-storage/common/log.h"
 
@@ -158,12 +159,7 @@ AliyunRAMSTSClient::AssumeRoleResult AliyunRAMSTSClient::GetAssumeRoleCredential
       m_endpoint, Aws::Http::HttpMethod::HTTP_POST, Aws::Utils::Stream::DefaultResponseStreamFactoryMethod));
   httpRequest->SetUserAgent(Aws::Client::ComputeUserAgentString());
 
-  auto body = Aws::MakeShared<Aws::StringStream>(kLogTag);
-  *body << body_str;
-  httpRequest->AddContentBody(body);
-  Aws::StringStream content_length;
-  content_length << body_str.size();
-  httpRequest->SetContentLength(content_length.str());
+  SetResendableBody(*httpRequest, Aws::String(body_str.data(), body_str.size()), kLogTag);
   httpRequest->SetContentType("application/x-www-form-urlencoded");
 
   const Aws::String payload = GetResourceWithAWSWebServiceResult(httpRequest).GetPayload();

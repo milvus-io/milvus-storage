@@ -1,5 +1,7 @@
 #include "milvus-storage/filesystem/s3/provider/TencentCloudOIDCAssumeRoleChainProvider.h"
+#include "milvus-storage/filesystem/s3/provider/STSClientUtils.h"
 
+#include <aws/core/client/DefaultRetryStrategy.h>
 #include <aws/core/platform/Environment.h>
 #include <aws/core/utils/UUID.h>
 
@@ -25,7 +27,9 @@ TencentCloudOIDCAssumeRoleChainProvider::TencentCloudOIDCAssumeRoleChainProvider
   m_innerOidc = Aws::MakeUnique<TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider>(kLogTag);
   Aws::Client::ClientConfiguration config(Aws::Client::ClientConfigurationInitValues{/*shouldDisableIMDS=*/true});
   config.scheme = Aws::Http::Scheme::HTTPS;
+  ApplySTSTimeouts(config);
   config.region = m_region;
+  config.retryStrategy = Aws::MakeShared<Aws::Client::DefaultRetryStrategy>(kLogTag, kSTSMaxRetries);
   m_stsClient = Aws::MakeUnique<TencentCloudSTSCredentialsClient>(kLogTag, config);
 }
 

@@ -84,14 +84,39 @@ class STSHttpClient : public Aws::Http::HttpClient {
       callback();
       lock.lock();
     }
+    // Constructing the response calls the request's response stream factory, as
+    // the SDK's curl client does before it uploads the body. Then read the body
+    // the way its ReadBody callback does, with read() from the stream's current
+    // position: a body that is not rewound, or whose end-of-stream flags are not
+    // cleared, arrives empty.
     auto response = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("AliyunTest", request);
+    std::string sent_body;
+    if (const auto& body = request->GetContentBody()) {
+      char buffer[4096];
+      for (;;) {
+        body->read(buffer, sizeof(buffer));
+        const auto read = body->gcount();
+        if (read <= 0) {
+          break;
+        }
+        sent_body.append(buffer, static_cast<size_t>(read));
+      }
+    }
+    // STS reads as many bytes as Content-Length declares and waits for any that
+    // are missing, so every attempt has to send exactly that many.
+    if (request->HasContentLength()) {
+      EXPECT_EQ(request->GetContentLength(), std::to_string(sent_body.size()))
+          << "body sent to " << request->GetURIString();
+    }
     if (responses_.empty()) {
       ADD_FAILURE() << "Unexpected STS request to " << request->GetURIString();
       response->SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
+      attempts_.push_back({std::move(sent_body), Aws::Http::HttpResponseCode::FORBIDDEN});
       return response;
     }
     auto spec = std::move(responses_.front());
     responses_.pop();
+    attempts_.push_back({std::move(sent_body), spec.code});
     response->SetResponseCode(spec.code);
     for (const auto& [name, value] : spec.headers) response->AddHeader(name, value);
     response->GetResponseBody() << spec.body;
@@ -105,6 +130,14 @@ class STSHttpClient : public Aws::Http::HttpClient {
     std::lock_guard<std::mutex> lock(mutex_);
     return responses_.size();
   }
+  struct Attempt {
+    std::string body;
+    Aws::Http::HttpResponseCode code;
+  };
+  std::vector<Attempt> Attempts() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return attempts_;
+  }
 
   private:
   mutable std::mutex mutex_;
@@ -115,13 +148,24 @@ class STSHttpClient : public Aws::Http::HttpClient {
   };
   mutable std::queue<Response> responses_;
   mutable size_t requests_ = 0;
+  mutable std::vector<Attempt> attempts_;
   mutable std::function<void()> before_response_;
 };
 
 class STSHttpFactory : public Aws::Http::HttpClientFactory {
   public:
-  explicit STSHttpFactory(std::shared_ptr<STSHttpClient> client) : client_(std::move(client)) {}
-  std::shared_ptr<Aws::Http::HttpClient> CreateHttpClient(const Aws::Client::ClientConfiguration&) const override {
+  struct Timeouts {
+    long connect_ms;
+    long total_ms;
+  };
+  explicit STSHttpFactory(std::shared_ptr<STSHttpClient> client,
+                          std::shared_ptr<std::vector<Timeouts>> timeouts = nullptr)
+      : client_(std::move(client)), timeouts_(std::move(timeouts)) {}
+  std::shared_ptr<Aws::Http::HttpClient> CreateHttpClient(
+      const Aws::Client::ClientConfiguration& config) const override {
+    if (timeouts_) {
+      timeouts_->push_back({config.connectTimeoutMs, config.httpRequestTimeoutMs});
+    }
     return client_;
   }
   std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(const Aws::String& uri,
@@ -139,6 +183,7 @@ class STSHttpFactory : public Aws::Http::HttpClientFactory {
 
   private:
   std::shared_ptr<STSHttpClient> client_;
+  std::shared_ptr<std::vector<Timeouts>> timeouts_;
 };
 
 std::string ExpirationAfter(std::chrono::seconds duration) {

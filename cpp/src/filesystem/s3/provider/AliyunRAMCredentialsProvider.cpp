@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/STSClientUtils.h"
 
 #include "milvus-storage/common/log.h"
 
@@ -60,6 +61,8 @@ std::shared_ptr<Aws::Http::HttpClient> MakeImdsHttpClient() {
   // refresh from blocking callers holding the credentials lock.
   cfg.connectTimeoutMs = 2000;
   cfg.requestTimeoutMs = 5000;
+  // The IMDS calls run under the reload lock as well; bound each whole request.
+  cfg.httpRequestTimeoutMs = 5000;
   cfg.retryStrategy = Aws::MakeShared<Aws::Client::DefaultRetryStrategy>(kLogTag, 0 /*maxRetries*/);
   return Aws::Http::CreateHttpClient(cfg);
 }
@@ -177,6 +180,8 @@ AliyunRAMCredentialsProvider::AliyunRAMCredentialsProvider(const Aws::String& ro
 
   Aws::Client::ClientConfiguration cfg(Aws::Client::ClientConfigurationInitValues{/*shouldDisableIMDS=*/true});
   cfg.scheme = Aws::Http::Scheme::HTTPS;
+  ApplySTSTimeouts(cfg);
+  cfg.retryStrategy = Aws::MakeShared<Aws::Client::DefaultRetryStrategy>(kLogTag, kSTSMaxRetries);
   m_stsClient = Aws::MakeUnique<AliyunRAMSTSClient>(kLogTag, cfg);
 
   LOG_STORAGE_INFO_ << fmt::format("[{}] Created RAM provider for role_arn={} session={} external_id_set={}", kLogTag,

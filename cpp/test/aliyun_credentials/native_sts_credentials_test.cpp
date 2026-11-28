@@ -19,6 +19,7 @@
 #include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/STSClientUtils.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/VolcengineCredentialsProvider.h"
@@ -65,8 +66,12 @@ class NativeSTSCredentialsTest : public ::testing::TestWithParam<std::string> {
 
   void SetUp() override {
     client_ = std::make_shared<STSHttpClient>();
-    options_.httpOptions.httpClientFactory_create_fn = [this] { return std::make_shared<STSHttpFactory>(client_); };
+    options_.httpOptions.httpClientFactory_create_fn = [this] {
+      return std::make_shared<STSHttpFactory>(client_, client_timeouts_);
+    };
     Aws::InitAPI(options_);
+    // Record only the HTTP clients that the providers create, not the SDK's own.
+    client_timeouts_->clear();
     token_path_ = std::filesystem::temp_directory_path() / ("sts-test-" + std::string(Aws::Utils::UUID::RandomUUID()));
     std::ofstream(token_path_) << "synthetic-oidc-token";
     if (Aliyun()) {
@@ -278,6 +283,8 @@ class NativeSTSCredentialsTest : public ::testing::TestWithParam<std::string> {
 
   Aws::SDKOptions options_;
   std::shared_ptr<STSHttpClient> client_;
+  std::shared_ptr<std::vector<STSHttpFactory::Timeouts>> client_timeouts_ =
+      std::make_shared<std::vector<STSHttpFactory::Timeouts>>();
   std::filesystem::path token_path_;
   std::vector<std::unique_ptr<ScopedEnvironment>> environment_;
   std::unique_ptr<Aws::Auth::AWSCredentialsProvider> provider_;
@@ -425,6 +432,74 @@ TEST_P(NativeSTSCredentialsTest, ConcurrentReadersSeeCompleteTuples) {
     EXPECT_FALSE(value.GetSessionToken().empty());
     EXPECT_FALSE(value.IsExpired());
   }
+}
+
+// The second-hop STS call runs while the provider holds its reload lock, so
+// every caller waits for its retries. A failing STS is retried at most three
+// times, as on the first hop, instead of the SDK default of ten.
+TEST_P(NativeSTSCredentialsTest, SecondHopRetriesFailingStsAtMostThreeTimes) {
+  if (!Chain() && GetParam() != "AliyunRAM") {
+    GTEST_SKIP() << "Second-hop STS client";
+  }
+  PrepareSource();
+  const size_t source_requests = GetParam() == "AliyunRAM" ? 3 : 1;
+  for (int i = 0; i < 4; ++i) {
+    client_->Enqueue("", Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE);
+  }
+  EXPECT_TRUE(provider_->GetAWSCredentials().IsEmpty());
+  EXPECT_EQ(client_->Requests(), source_requests + 4);
+}
+
+// AWSHttpResourceClient retries by sending the same request again. Every STS
+// call that it retries must send its whole body again, or STS waits for a body
+// that never arrives and the retry cannot succeed.
+TEST_P(NativeSTSCredentialsTest, RetriesResendTheFullRequestBody) {
+  const auto unavailable = [this] { client_->Enqueue("", Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE); };
+  if (GetParam() == "AliyunRAM") {
+    client_->Enqueue("synthetic-imds-token");
+    client_->Enqueue("machine-role");
+    client_->Enqueue(ImdsCredentialsJson());
+  } else if (Huawei()) {
+    unavailable();
+    // The real IAM endpoint answers 201 Created.
+    client_->Enqueue("{}", Aws::Http::HttpResponseCode::CREATED, {{"x-subject-token", "synthetic-iam-token"}});
+  } else if (Chain()) {
+    unavailable();
+    client_->Enqueue(Response("machine", 3600, "", true));
+    source_loaded_ = true;
+  }
+  if (!Huawei()) {
+    unavailable();
+  }
+  client_->Enqueue(Response("new", 3600));
+
+  EXPECT_EQ(provider_->GetAWSCredentials().GetAWSAccessKeyId(), "new_ak");
+  const auto attempts = client_->Attempts();
+  size_t retried = 0;
+  for (size_t i = 0; i + 1 < attempts.size(); ++i) {
+    if (attempts[i].code != Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE) {
+      continue;
+    }
+    ++retried;
+    EXPECT_FALSE(attempts[i].body.empty()) << "attempt " << i;
+    EXPECT_EQ(attempts[i + 1].body, attempts[i].body) << "attempt " << i + 1;
+  }
+  EXPECT_EQ(retried, Chain() ? 2u : 1u);
+}
+
+// The provider's HTTP calls run while it holds its reload lock, so every HTTP
+// client it creates bounds the whole attempt, and its STS clients use the STS
+// limits.
+TEST_P(NativeSTSCredentialsTest, HttpClientsBoundEachAttempt) {
+  LoadOld(3600);
+  size_t sts_clients = 0;
+  for (const auto& timeouts : *client_timeouts_) {
+    EXPECT_GT(timeouts.total_ms, 0);
+    if (timeouts.connect_ms == kSTSConnectTimeoutMs && timeouts.total_ms == kSTSAttemptTimeoutMs) {
+      ++sts_clients;
+    }
+  }
+  EXPECT_GE(sts_clients, Chain() ? 2u : 1u);
 }
 
 TEST_P(NativeSTSCredentialsTest, ChainNeverFallsBackToMachineIdentity) {

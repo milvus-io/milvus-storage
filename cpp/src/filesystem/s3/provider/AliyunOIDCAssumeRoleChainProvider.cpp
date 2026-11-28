@@ -13,10 +13,12 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
+#include "milvus-storage/filesystem/s3/provider/STSClientUtils.h"
 
 #include "milvus-storage/common/log.h"
 
 #include <aws/core/client/ClientConfiguration.h>
+#include <aws/core/client/DefaultRetryStrategy.h>
 #include <aws/core/utils/DateTime.h>
 #include <aws/core/utils/UUID.h>
 
@@ -47,6 +49,8 @@ AliyunOIDCAssumeRoleChainProvider::AliyunOIDCAssumeRoleChainProvider(const Aws::
 
   Aws::Client::ClientConfiguration cfg(Aws::Client::ClientConfigurationInitValues{/*shouldDisableIMDS=*/true});
   cfg.scheme = Aws::Http::Scheme::HTTPS;
+  ApplySTSTimeouts(cfg);
+  cfg.retryStrategy = Aws::MakeShared<Aws::Client::DefaultRetryStrategy>(kLogTag, kSTSMaxRetries);
   m_stsClient = Aws::MakeUnique<AliyunRAMSTSClient>(kLogTag, cfg);
 
   LOG_STORAGE_INFO_ << fmt::format(

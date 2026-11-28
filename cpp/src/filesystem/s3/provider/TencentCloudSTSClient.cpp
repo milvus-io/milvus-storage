@@ -15,6 +15,7 @@
  */
 
 #include "milvus-storage/filesystem/s3/provider/TencentCloudSTSClient.h"
+#include "milvus-storage/filesystem/s3/provider/STSClientUtils.h"
 
 #include "milvus-storage/common/log.h"
 
@@ -154,10 +155,7 @@ Aws::Auth::AWSCredentials TencentCloudSTSCredentialsClient::SendRequest(const Aw
   } else {
     request->SetHeaderValue("Authorization", "SKIP");
   }
-  auto stream = Aws::MakeShared<Aws::StringStream>(kLogTag);
-  *stream << body;
-  request->AddContentBody(stream);
-  request->SetContentLength(std::to_string(body.size()));
+  SetResendableBody(*request, body, kLogTag);
   auto credentials = ParseCredentials(GetResourceWithAWSWebServiceResult(request).GetPayload());
   if (credentials.IsEmpty())
     LOG_STORAGE_WARNING_ << "Tencent STS " << action << " returned no valid credentials";

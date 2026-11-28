@@ -15,6 +15,7 @@
  */
 
 #include "milvus-storage/filesystem/s3/provider/AliyunSTSClient.h"
+#include "milvus-storage/filesystem/s3/provider/STSClientUtils.h"
 
 #include "milvus-storage/common/log.h"
 
@@ -106,16 +107,7 @@ AliyunSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
 
   httpRequest->SetUserAgent(Aws::Client::ComputeUserAgentString());
 
-  std::shared_ptr<Aws::IOStream> body = Aws::MakeShared<Aws::StringStream>("STS_RESOURCE_CLIENT_LOG_TAG");
-  *body << ss.str();
-
-  httpRequest->AddContentBody(body);
-  body->seekg(0, body->end);
-  auto streamSize = body->tellg();
-  body->seekg(0, body->beg);
-  Aws::StringStream contentLength;
-  contentLength << streamSize;
-  httpRequest->SetContentLength(contentLength.str());
+  SetResendableBody(*httpRequest, ss.str(), "STS_RESOURCE_CLIENT_LOG_TAG");
   httpRequest->SetContentType("application/x-www-form-urlencoded");
 
   Aws::String credentialsStr = GetResourceWithAWSWebServiceResult(httpRequest).GetPayload();
