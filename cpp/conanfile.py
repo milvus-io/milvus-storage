@@ -163,24 +163,61 @@ class StorageConan(ConanFile):
         self.requires("xz_utils/5.4.5#fc4e36861e0a47ecd4a40a00e6d29ac8")
         self.requires("glog/0.7.1#a306e61d7b8311db8cb148ad62c48030")
         self.requires("zstd/1.5.5#70dc5eb8ea16708fc946fbac884c507e")
-        self.requires("fmt/11.2.0#eb98daa559c7c59d591f4720dde4cd5c", force=True)
+        self.requires("fmt/11.2.0#9e6db8ce0c09fbec6b24e461cf520c53", force=True)
         self.requires("prometheus-cpp/1.2.4#0918d66c13f97acb7809759f9de49b3f")
         self.requires("gflags/2.2.2#7671803f1dc19354cc90bd32874dcfda")
-        self.requires("boost/1.83.0#4e8a94ac1b88312af95eded83cd81ca8", force=True)
-        self.requires("arrow/17.0.0@milvus/dev-2.6#c743ea7a6f2420ba5811b2be3df59892")
+        # boost/1.83.0@milvus/dev#b28dcffa carries the milvus-io/conanfiles#270
+        # fix for gcc-15/16 UB in boost::json emplace (value.ipp/value.hpp
+        # placement-new with unspecified ordering, value_ref missing move
+        # constructor), which crashes under gcc-16. The plain boost/1.83.0
+        # reference was never re-uploaded after the fix, only the @milvus/dev
+        # channel was, so the pin must reference the channel explicitly.
+        self.requires("boost/1.83.0@milvus/dev#b28dcffaf033d2578693838cde973f64", force=True)
+        # arrow recipe revision from milvus-io/conanfiles#274, published on the
+        # @milvus/dev channel: #274 disambiguates the vendored Howard
+        # Hinnant date library's ostream operators vs libc++'s C++20
+        # std::chrono operator<< (GH-43094 port), which clang-17 (macos-15)
+        # otherwise rejects as ambiguous.
+        self.requires("arrow/17.0.0@milvus/dev#c139833378c1a1ea8a60adc742a63dce")
+        # thrift recipe revision from milvus-io/conanfiles#273: TEnumIterator
+        # only defined operator!=; new libc++ (llvm 21+/clang-23) std::map
+        # range-insert requires operator==, breaking arrow's generated
+        # parquet_types.cpp. Arrow's recipe requires plain thrift/0.17.0, so
+        # force=True overrides it to the fixed @milvus/dev revision.
+        self.requires("thrift/0.17.0@milvus/dev#09045d72ce15e25e36f3a32281e7715f", force=True)
+        # Pin rapidjson to the newest cci snapshot, matching milvus-io/milvus
+        # internal/core/conanfile.py. Arrow 17 pulls rapidjson/1.1.0
+        # transitively, whose GenericStringRef::operator= assigns to the const
+        # members s/length; gcc-16's -Wtemplate-body and clang-23 both reject
+        # that as a hard error (fixed upstream as /* = delete */). force=True
+        # overrides Arrow's transitive version.
+        self.requires("rapidjson/cci.20230929#0a3982e5f4fa453a9b9cd0dd5b1dcb3a", force=True)
         self.requires("openssl/3.3.2#9f9f130d58e7c13e76bb8a559f0a6a8b", force=True, override=True)
         self.requires("zlib/1.3.1#8045430172a5f8d56ba001b14561b4ea")
         self.requires("libcurl/8.10.1#a3113369c86086b0e84231844e7ed0a9", force=True, override=True)
-        self.requires("folly/2026.04.20.00@milvus/dev#06852bea5b6449f0c4eb0df002b5779c")
-        self.requires("libavrocpp/1.12.1.1@milvus/dev#b4854183542196740ec9a004fdfff7ec")
+        # folly recipe revision with the upstream fix backported by
+        # milvus-io/conanfiles#252 (facebook/folly 97d5b31d): folly/result/
+        # epitaph.{h,cpp} were missing <algorithm>/<vector>, rejected by the
+        # libc++ shipped with clang-23 (see zilliztech/milvus-common#155).
+        # force=True keeps the whole graph on this fixed revision.
+        self.requires("folly/2026.04.20.00@milvus/dev#bb88f7ffd53457e8fa8f4516eaec6c60", force=True)
+        self.requires("libavrocpp/1.12.1.1@milvus/dev#2bca5dd2a455467026e5d1a20a3e1997")
         self.requires("google-cloud-cpp/2.28.0@milvus/dev#468918b43cec43624531a0340398cf43")
         self.requires("opentelemetry-cpp/1.23.0@milvus/dev#11bc565ec6e82910ae8f7471da756720")
         self.requires("milvus-common/1.0.0-a88c21f@milvus/dev#0eb9a7f2f5d5fe0e7d37f45f3f9a38ea")
         # azure-sdk-for-cpp is a transitive dep of Arrow, but must be declared
         # as a direct dep so CMakeDeps generates standalone cmake config files.
         # Without this, find_package(Azure) can't find include directories.
-        self.requires("azure-sdk-for-cpp/1.16.4@milvus/dev#7c95e3df67cfea28b3cf6dbd60fbf137", force=True)
-        self.requires("aws-sdk-cpp/1.11.921@milvus/dev#0b229410d5498d3bacc19ccf57334b30", force=True)
+        self.requires("azure-sdk-for-cpp/1.16.4@milvus/dev#f59f3561b92b3ca583202d6d93faa932", force=True)
+        # aws-sdk-cpp recipe revision with the fix from milvus-io/conanfiles#255:
+        # AWS_SDK_WARNINGS_ARE_ERRORS=OFF. clang-23's more precise
+        # -Wunused-but-set-global analysis trips on the dead
+        # s_InitCleanupOpenSSLFlag in aws-cpp-sdk-core (Factories.cpp:112,
+        # set but never read), and -Werror (default ON) turns it into a
+        # build failure. The recipe's older -Werror-removal patch silently
+        # stopped matching when AWS switched to a conditional pattern, so
+        # without this bump the clang-23 build fails.
+        self.requires("aws-sdk-cpp/1.11.921@milvus/dev#1cae1f8e6ea5904a8f6fdb39a1d2b958", force=True)
         # Keep the SDK and native CRT consumers on the same dependency graph.
         self.requires("aws-crt-cpp/0.44.3#43f6408847655d35224320f4774bfcb9")
         # Force override transitive deps to align with milvus-common
@@ -192,7 +229,7 @@ class StorageConan(ConanFile):
         self.requires("lz4/1.9.4#7f0b5851453198536c14354ee30ca9ae", force=True, override=True)
         if self.options.with_benchmark:
             # don't use 1.7.0 which have core when `--help`.
-            self.requires("benchmark/1.8.3")
+            self.requires("benchmark/1.9.5")
         if self.options.with_ut:
             self.requires("gtest/1.15.0")
         if self.settings.os != "Macos":

@@ -1,0 +1,218 @@
+name: Compiler Upper-bound Build
+
+# Upper-bound compiler verification: build milvus-storage with gcc-16
+# (ubuntu-24.04) and clang-23 (macos-26), mirroring the compiler range
+# targeted by the Milvus dependency validation. Experimental workflow.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'cpp/**'
+      - '.github/workflows/compiler-upper-bound.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gcc16-build:
+    name: Build on ubuntu-24.04 (gcc-16)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y libaio-dev python3-pip
+
+      # Job-local conan 2.33.0: the repo-pinned 2.25.1 settings stop at
+      # gcc 15.2 / clang 21. 2.33.0 knows compiler.version=16/23.
+      - name: Install Conan and CMake
+        run: pip3 install conan==2.33.0 cmake==3.31.10
+
+      - name: Install gcc-16 toolchain
+        run: |
+          # gcc-16 is not packaged by Ubuntu 24.04 apt or the toolchain PPA, so
+          # use Homebrew-on-Linux; its bundled glibc (2.39) matches ubuntu-24.04.
+          NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          brew install gcc@16 binutils
+          mkdir -p "$RUNNER_TEMP/toolchain-bin"
+          ln -sf "$(brew --prefix gcc@16)/bin/gcc-16" "$RUNNER_TEMP/toolchain-bin/gcc"
+          ln -sf "$(brew --prefix gcc@16)/bin/g++-16" "$RUNNER_TEMP/toolchain-bin/g++"
+          # gcc-16 emits .base64 pseudo-ops that need binutils >= 2.43; prefer
+          # the binutils bundled with the Homebrew gcc. Also persist the gcc@16
+          # bin dir: tools.build:compiler_executables names gcc-16/g++-16.
+          echo "$(brew --prefix gcc@16)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix binutils)/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/toolchain-bin" >> "$GITHUB_PATH"
+
+      - name: Record gcc-16 version
+        env:
+          BREW_PREFIX: /home/linuxbrew/.linuxbrew
+        run: |
+          # Homebrew updates the gcc@16 formula over time; hash the compiler
+          # identity into the Conan cache key so a restored cache can never
+          # silently reuse binaries built by an older gcc-16 patch release.
+          GCC16_BIN="$BREW_PREFIX/bin/gcc-16"
+          GCC16_ID="$("$GCC16_BIN" --version | sha256sum | cut -d' ' -f1 | cut -c1-12)"
+          echo "GCC16_BIN=$GCC16_BIN" >> "$GITHUB_ENV"
+          echo "GCC16_ID=$GCC16_ID" >> "$GITHUB_ENV"
+
+      - name: Setup Rust
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore rust build cache
+        id: rust-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            cpp/build/Release/cargo/build
+          key: storage-bridge-rust-gcc16-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
+          restore-keys: |
+            storage-bridge-rust-gcc16-${{ steps.rust-toolchain.outputs.cachekey }}-
+
+      - name: Restore conan package cache
+        id: conan-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.conan2
+          key: conan-cpp-gcc16-${{ env.GCC16_ID }}-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: |
+            conan-cpp-gcc16-${{ env.GCC16_ID }}-
+
+      - name: Setup Conan Profile
+        run: |
+          # detect reads the gcc-16 wrappers on PATH, so it records
+          # compiler=gcc / compiler.version=16 (known to Conan 2.33 settings).
+          conan profile detect --force
+          # detect keys off `cc`, which still resolves to the system gcc; pin
+          # the profile to gcc-16 to match the compiler_executables below.
+          profile_path="$(conan profile path default)"
+          sed -i -e 's/^compiler.version=.*/compiler.version=16/' \
+                 -e 's/^compiler=.*/compiler=gcc/' "$profile_path"
+          # Conan 2 has no `conan profile update`; append the compiler
+          # executables mapping as a [conf] section on the default profile.
+          printf '\n[conf]\ntools.build:compiler_executables={"c":"gcc-16","cpp":"g++-16"}\n' \
+            >> "$profile_path"
+          # --index 0 --force: keep the milvus remote first so its fork recipes
+          # (aws-c-* with aws-c-common/0.14.0) beat identical versions published
+          # later on conancenter (aws-c-event-stream/0.7.1 requires 0.14.5).
+          conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 --index 0 --force || true
+          conan remote list
+
+      - name: Build
+        working-directory: ./cpp
+        run: make build USE_ASAN=False
+
+      - name: Save conan package cache
+        if: steps.conan-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.conan2
+          key: conan-cpp-gcc16-${{ env.GCC16_ID }}-${{ hashFiles('./cpp/conanfile.py') }}
+
+      - name: Save rust build cache
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            cpp/build/Release/cargo/build
+          key: storage-bridge-rust-gcc16-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
+
+  clang23-build:
+    name: Build on macos-26 (clang-23)
+    runs-on: macos-26
+    timeout-minutes: 300
+    env:
+      # The macos-26 runner's default CMake is 4.x; several Conan recipes
+      # (e.g. bzip2/1.0.8) still declare cmake_minimum_required < 3.5, which
+      # CMake 4.x rejects. This env var makes those configure steps proceed.
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@v4
+
+      # Job-local conan 2.33.0 for clang-23 settings (see the gcc-16 job).
+      - name: Install dependencies
+        uses: aminya/setup-cpp@v1
+        with:
+          conan: 2.33.0
+          cmake: 3.31.10
+
+      - name: Install LLVM 23
+        run: brew install llvm@23 libomp
+
+      - name: Use LLVM 23
+        run: |
+          LLVM_PREFIX="$(brew --prefix llvm@23)"
+          echo "CC=$LLVM_PREFIX/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=$LLVM_PREFIX/bin/clang++" >> "$GITHUB_ENV"
+          echo "$LLVM_PREFIX/bin" >> "$GITHUB_PATH"
+
+      - name: Setup Rust
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore rust build cache
+        id: rust-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            cpp/build/Release/cargo/build
+          key: storage-bridge-rust-clang23-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
+          restore-keys: |
+            storage-bridge-rust-clang23-${{ steps.rust-toolchain.outputs.cachekey }}-
+
+      - name: Record clang-23 version
+        run: |
+          # Hash the compiler identity into the Conan cache key (same rationale
+          # as the gcc-16 job's GCC16_ID). macOS ships shasum, not sha256sum.
+          CLANG23_ID="$("$CC" --version | shasum -a 256 | cut -d' ' -f1 | cut -c1-12)"
+          echo "CLANG23_ID=$CLANG23_ID" >> "$GITHUB_ENV"
+
+      - name: Restore conan package cache
+        id: conan-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.conan2
+          key: conan-cpp-clang23-${{ env.CLANG23_ID }}-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: |
+            conan-cpp-clang23-${{ env.CLANG23_ID }}-
+
+      - name: Setup Conan Profile
+        run: |
+          # detect reads CC/CXX, so it records compiler=clang / version=23
+          # (known to Conan 2.33 settings).
+          conan profile detect --force
+          profile_path="$(conan profile path default)"
+          # BSD sed: `-i` requires a suffix argument, hence the '' after -i.
+          sed -i '' -e 's/^compiler.version=.*/compiler.version=23/' \
+                 -e 's/^compiler=.*/compiler=clang/' "$profile_path"
+          # Conan 2 has no `conan profile update`; append the compiler
+          # executables mapping as a [conf] section on the default profile.
+          printf '\n[conf]\ntools.build:compiler_executables={"c":"%s","cpp":"%s"}\ntools.build:cxxflags=["-Wno-c2y-extensions"]\n' "$CC" "$CXX" \
+            >> "$profile_path"
+          conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 --index 0 --force || true
+          conan remote list
+
+      - name: Build
+        working-directory: ./cpp
+        run: |
+          make build USE_ASAN=False libcxx_setting="-s:h compiler.libcxx=libc++ -s:h compiler.cppstd=20 -s:h arrow/*:compiler.cppstd=17 -s:b compiler.libcxx=libc++ -s:b compiler.cppstd=20"
+
+      - name: Save conan package cache
+        if: steps.conan-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.conan2
+          key: conan-cpp-clang23-${{ env.CLANG23_ID }}-${{ hashFiles('./cpp/conanfile.py') }}
+
+      - name: Save rust build cache
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            cpp/build/Release/cargo/build
+          key: storage-bridge-rust-clang23-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
