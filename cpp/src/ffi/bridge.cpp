@@ -212,23 +212,24 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
 
     // Export delta logs (only PRIMARY_KEY type for FFI)
     const auto& delta_logs = manifest->deltaLogs();
-    std::vector<std::string> delta_log_paths;
-    std::vector<uint32_t> delta_log_num_entries;
+    std::vector<const DeltaLog*> pk_delta_logs;
     for (const auto& delta_log : delta_logs) {
       if (delta_log.type == DeltaLogType::PRIMARY_KEY) {
-        delta_log_paths.push_back(delta_log.path);
-        delta_log_num_entries.push_back(static_cast<uint32_t>(delta_log.num_entries));
+        pk_delta_logs.push_back(&delta_log);
       }
     }
-    if (!delta_log_paths.empty()) {
+    if (!pk_delta_logs.empty()) {
       // Assign arrays immediately so destroy functions can clean up on exception
-      (*out_cmanifest)->delta_logs.delta_log_paths = new const char* [delta_log_paths.size()] {};
-      (*out_cmanifest)->delta_logs.delta_log_num_entries = new uint32_t[delta_log_paths.size()];
-      (*out_cmanifest)->delta_logs.num_delta_logs = static_cast<uint32_t>(delta_log_paths.size());
+      auto& logs = (*out_cmanifest)->delta_logs;
+      logs.delta_log_paths = new const char* [pk_delta_logs.size()] {};
+      logs.delta_log_num_entries = new uint32_t[pk_delta_logs.size()];
+      logs.delta_log_file_sizes = new int64_t[pk_delta_logs.size()];
+      logs.num_delta_logs = static_cast<uint32_t>(pk_delta_logs.size());
 
-      for (size_t i = 0; i < delta_log_paths.size(); i++) {
-        (*out_cmanifest)->delta_logs.delta_log_paths[i] = copy_string(delta_log_paths[i]);
-        (*out_cmanifest)->delta_logs.delta_log_num_entries[i] = delta_log_num_entries[i];
+      for (size_t i = 0; i < pk_delta_logs.size(); i++) {
+        logs.delta_log_paths[i] = copy_string(pk_delta_logs[i]->path);
+        logs.delta_log_num_entries[i] = static_cast<uint32_t>(pk_delta_logs[i]->num_entries);
+        logs.delta_log_file_sizes[i] = pk_delta_logs[i]->file_size_bytes;
       }
     }
 
@@ -378,6 +379,9 @@ arrow::Status manifest_import(const LoonManifest* cmanifest,
     delta_log.path = std::string(cmanifest->delta_logs.delta_log_paths[i]);
     delta_log.type = DeltaLogType::PRIMARY_KEY;
     delta_log.num_entries = cmanifest->delta_logs.delta_log_num_entries[i];
+    if (cmanifest->delta_logs.delta_log_file_sizes) {
+      delta_log.file_size_bytes = cmanifest->delta_logs.delta_log_file_sizes[i];
+    }
     delta_logs.push_back(delta_log);
   }
 
@@ -511,9 +515,10 @@ std::string manifest_debug_string(const LoonManifest* cmanifest) {
   result += fmt::format("  DeltaLogs(num_delta_logs={}):\n", cmanifest->delta_logs.num_delta_logs);
   for (uint32_t i = 0; i < cmanifest->delta_logs.num_delta_logs; i++) {
     result +=
-        fmt::format("    DeltaLog[{}]: path={}, num_entries={}\n", i,
+        fmt::format("    DeltaLog[{}]: path={}, num_entries={}, file_size_bytes={}\n", i,
                     cmanifest->delta_logs.delta_log_paths[i] ? cmanifest->delta_logs.delta_log_paths[i] : "(null)",
-                    cmanifest->delta_logs.delta_log_num_entries[i]);
+                    cmanifest->delta_logs.delta_log_num_entries[i],
+                    cmanifest->delta_logs.delta_log_file_sizes ? cmanifest->delta_logs.delta_log_file_sizes[i] : 0);
   }
 
   // Stats

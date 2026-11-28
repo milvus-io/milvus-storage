@@ -235,7 +235,7 @@ func main() {
 		defer C.loon_transaction_destroy(transaction)
 		if os.Getenv("MANIFEST_COMMIT") == "1" {
 			path := C.CString("_delta/example")
-			mutationErr := consume(C.loon_transaction_add_delta_log(transaction, path, 1))
+			mutationErr := consume(C.loon_transaction_add_delta_log(transaction, path, 1, 0))
 			C.free(unsafe.Pointer(path))
 			if mutationErr != nil {
 				panic(mutationErr)

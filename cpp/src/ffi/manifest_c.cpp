@@ -288,9 +288,15 @@ LoonFFIResult loon_transaction_append_files(LoonTransactionHandle handle, const 
   RETURN_UNREACHABLE();
 }
 
-LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle, const char* path, int64_t num_entries) {
+LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle,
+                                             const char* path,
+                                             int64_t num_entries,
+                                             int64_t file_size_bytes) {
   if (!handle || !path) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and path must not be null");
+  }
+  if (file_size_bytes < 0) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Delta log file size must be nonnegative");
   }
   try {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
@@ -300,6 +306,7 @@ LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle, const
     delta_log.path = path;
     delta_log.type = DeltaLogType::PRIMARY_KEY;
     delta_log.num_entries = num_entries;
+    delta_log.file_size_bytes = file_size_bytes;
 
     cpp_transaction->AddDeltaLog(delta_log);
     RETURN_SUCCESS();
@@ -459,6 +466,7 @@ void loon_manifest_destroy(LoonManifest* cmanifest) {
     delete[] cmanifest->delta_logs.delta_log_num_entries;
     cmanifest->delta_logs.delta_log_num_entries = nullptr;
   }
+  delete[] cmanifest->delta_logs.delta_log_file_sizes;
   cmanifest->delta_logs.num_delta_logs = 0;
 
   // Destroy stats

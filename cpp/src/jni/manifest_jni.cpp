@@ -189,8 +189,9 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transacti
   });
 }
 
+// Callers may pass 0 for file_size_bytes when the delta log size is unknown.
 JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionAddDeltaLog(
-    JNIEnv* env, jobject, jlong handle, jstring path, jlong entries) {
+    JNIEnv* env, jobject, jlong handle, jstring path, jlong entries, jlong file_size_bytes) {
   GuardVoid(env, [&] {
     ScopedUtf8 p(env, path);
     if (!p.valid())
@@ -199,7 +200,8 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transacti
       Throw(env, "java/lang/IllegalArgumentException", "Delta entry count must be nonnegative");
       return;
     }
-    CheckResult(env, loon_transaction_add_delta_log(static_cast<LoonTransactionHandle>(handle), p.get(), entries));
+    CheckResult(env, loon_transaction_add_delta_log(static_cast<LoonTransactionHandle>(handle), p.get(), entries,
+                                                    file_size_bytes));
   });
 }
 

@@ -180,10 +180,14 @@ def test_transaction_add_delta_log(temp_dir, sample_schema, properties):
 
     with Transaction(temp_dir, properties=properties) as txn:
         txn.append_files(column_groups)
-        txn.add_delta_log("delta/log_001.parquet", num_entries=10)
+        txn.add_delta_log("delta/log_001.parquet", num_entries=10, file_size_bytes=2**32 + 1)
         version = txn.commit()
 
         assert isinstance(version, int)
+
+    with Transaction(temp_dir, properties=properties, read_version=version) as txn:
+        (delta,) = txn.get_manifest().delta_logs
+        assert delta.file_size_bytes == 2**32 + 1
 
     destroy_column_groups(column_groups)
 
@@ -192,7 +196,9 @@ def test_transaction_add_delta_log_invalid_entries(temp_dir, properties):
     """Test adding delta log with invalid num_entries."""
     with Transaction(temp_dir, properties=properties) as txn:
         with pytest.raises(InvalidArgumentError):
-            txn.add_delta_log("delta/log.parquet", num_entries=-1)
+            txn.add_delta_log("delta/log.parquet", num_entries=-1, file_size_bytes=0)
+        with pytest.raises(InvalidArgumentError):
+            txn.add_delta_log("delta/log.parquet", num_entries=1, file_size_bytes=-1)
 
 
 def test_transaction_update_stat(temp_dir, sample_schema, properties):
