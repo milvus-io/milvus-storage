@@ -185,7 +185,15 @@ class StorageConan(ConanFile):
         # as a direct dep so CMakeDeps generates standalone cmake config files.
         # Without this, find_package(Azure) can't find include directories.
         self.requires("azure-sdk-for-cpp/1.16.4@milvus/dev#f59f3561b92b3ca583202d6d93faa932", force=True)
-        self.requires("aws-sdk-cpp/1.11.921@milvus/dev#0b229410d5498d3bacc19ccf57334b30", force=True)
+        # aws-sdk-cpp recipe revision with the fix from milvus-io/conanfiles#255:
+        # AWS_SDK_WARNINGS_ARE_ERRORS=OFF. clang-23's more precise
+        # -Wunused-but-set-global analysis trips on the dead
+        # s_InitCleanupOpenSSLFlag in aws-cpp-sdk-core (Factories.cpp:112,
+        # set but never read), and -Werror (default ON) turns it into a
+        # build failure. The recipe's older -Werror-removal patch silently
+        # stopped matching when AWS switched to a conditional pattern, so
+        # without this bump the clang-23 build fails.
+        self.requires("aws-sdk-cpp/1.11.921@milvus/dev#1cae1f8e6ea5904a8f6fdb39a1d2b958", force=True)
         # Keep the SDK and native CRT consumers on the same dependency graph.
         self.requires("aws-crt-cpp/0.44.3#43f6408847655d35224320f4774bfcb9")
         # Force override transitive deps to align with milvus-common
